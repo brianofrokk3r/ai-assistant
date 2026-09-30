@@ -7,6 +7,7 @@ import type { CodexOptions, Thread, ThreadOptions } from "@openai/codex-sdk";
 import { resolveSessionContext } from "../src/common/sessionContext.js";
 import { SessionStore } from "../src/common/sessionStore.js";
 import { CODEX_WEB_SEARCH_MODES, CodexProvider } from "../src/providers/codex.js";
+import { SessionManager } from "../src/sessionManager.js";
 
 function thread(id: string): Thread {
   return { id, run: async () => ({ finalResponse: "ready", items: [], usage: null }) } as unknown as Thread;
@@ -64,6 +65,23 @@ test("invalid Codex hosted web search mode fails provider construction", () => {
   } finally {
     if (previous === undefined) delete process.env.CODEX_WEB_SEARCH_MODE;
     else process.env.CODEX_WEB_SEARCH_MODE = previous;
+  }
+});
+
+test("non-Codex provider initialization ignores invalid Codex hosted web search mode", async t => {
+  const previous = process.env.CODEX_WEB_SEARCH_MODE;
+  const root = mkdtempSync(join(tmpdir(), "non-codex-web-search-"));
+  process.env.CODEX_WEB_SEARCH_MODE = "not-a-mode";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_WEB_SEARCH_MODE;
+    else process.env.CODEX_WEB_SEARCH_MODE = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const provider of ["copilot", "opencode"] as const) {
+    const sessions = new SessionManager(provider, undefined, join(root, provider));
+    assert.equal(sessions.name, provider);
+    await sessions.shutdown();
   }
 });
 
