@@ -176,7 +176,7 @@ async function sendUntilIdle(
       if (event.type === "assistant.message") {
         lastAssistantMessage = event.data.content;
       } else if (event.type === "session.idle") {
-        finish(() => resolve(lastAssistantMessage ?? "(no response)"));
+        finish(() => resolve(lastAssistantMessage ?? (options?.transportContext?.attachments ? "" : "(no response)")));
       } else if (event.type === "session.error") {
         finish(() => reject(new Error(event.data.message)));
       }
@@ -451,7 +451,7 @@ export class CopilotProvider implements Provider {
               },
               options,
             );
-          }))));
+          }), Boolean(options?.transportContext?.attachments))));
         } catch (error) {
           if (options?.signal?.aborted || (error instanceof RunTimeoutError && !error.cancellationConfirmed)) {
             this.abandonTimedOutSession(userId, session);

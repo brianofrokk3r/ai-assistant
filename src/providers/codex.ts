@@ -689,7 +689,8 @@ export class CodexProvider implements Provider {
           this.store.set(userId, this.sessions.get(userId)!.id!, context.applied);
           this.handoffs.delete(userId);
         }
-        const finalResponse = result.finalResponse || this.extractFinalResponse(result.items) || "(no response)";
+        const finalResponse = result.finalResponse || this.extractFinalResponse(result.items)
+          || (options?.transportContext?.attachments ? "" : "(no response)");
         const generatedRoot = codexGeneratedImagesRoot();
         return {
           content: finalResponse,
@@ -699,7 +700,7 @@ export class CodexProvider implements Provider {
             displayName: `generated-image-${index + 1}${path.extname(savedPath)}`,
           })),
         };
-      }))));
+      }), Boolean(options?.transportContext?.attachments))));
       this.appendHistory(userId, { type: "assistant.message", data: { content: response.content } });
       return response;
     });

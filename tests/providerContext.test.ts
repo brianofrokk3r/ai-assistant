@@ -44,6 +44,8 @@ test('attachment transport capability changes the session context fingerprint', 
   const withFiles = resolveSessionContext({ transportContext: { platform: 'slack', history: true, attachments: true } });
   assert.notEqual(withFiles.fingerprint, withoutFiles.fingerprint);
   assert.match(withFiles.systemPrompt, /attach validated files/);
+  assert.match(withFiles.systemPrompt, /active chat transport/);
+  assert.doesNotMatch(withFiles.systemPrompt, /Discord delivery|Discord client/);
   assert.doesNotMatch(withoutFiles.systemPrompt, /attach validated files/);
 });
 

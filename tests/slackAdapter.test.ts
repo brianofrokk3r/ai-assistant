@@ -108,6 +108,21 @@ test('recovered generated output cannot cross a changed audience',async()=>{
  }finally{await f.close()}
 });
 
+test('Slack recovers generated top-level channel output without rerunning the provider', async () => {
+ const f=setup();
+ try {
+  const generate=f.engine.sendMessage;let output:TurnOutput|undefined;
+  f.engine.sendMessage=async(...args)=>{const result=await generate(...args);output=result;return result};
+  const handle=await f.adapter.receive(event('channel-recovery','1700000003.000000'));
+  const delivered=await handle!.completion;
+  assert.equal(delivered.input.conversation.kind,'channel');assert.ok(output?.audienceTag);
+  f.journal.put({...delivered,state:'generated',output,receipt:undefined});
+  await f.adapter.recover();
+  assert.equal(f.journal.get(delivered.id)?.state,'delivered');
+  assert.equal(f.posts.length,2);assert.equal(f.posts[1].thread_ts,undefined);assert.equal(f.prompts.length,1);
+ } finally {await f.close();}
+});
+
 for (const check of [1, 2]) test('Slack recovery preserves output when authorization check ' + check + ' is unavailable', async () => {
  const f = setup();
  try {
