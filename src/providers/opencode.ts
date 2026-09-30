@@ -374,8 +374,8 @@ export class OpenCodeProvider implements Provider {
           this.sessions.set(userId, newSessionId);
           this.store.set(userId, newSessionId, context.applied);
         }
-        return finalTextFromEvents(events) || "(no response)";
-      }))));
+        return finalTextFromEvents(events) || (options?.transportContext?.attachments ? "" : "(no response)");
+      }), Boolean(options?.transportContext?.attachments))));
       this.appendHistory(userId, { type: "assistant.message", data: { content: response.content } });
       return response;
     });

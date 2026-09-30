@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SendMessageOptions, SendAttachment } from '../src/providers/types.js';
 import type { TurnOutput } from '../src/core/conversation.js';
-import { SlackAdapter, type SlackApi } from '../src/adapters/slack.js';
+import { SlackAdapter, SlackWebApi, slackUploadUrl, type SlackApi } from '../src/adapters/slack.js';
 import { ConversationService, MemoryTurnJournal } from '../src/application/conversationService.js';
 const event = (id:string,ts:string,thread?:string) => ({team_id:'T',event_id:id,event:{type:'app_mention',user:'U',channel:'C',text:'<@BOT> question',ts,...(thread?{thread_ts:thread}:{})}});
 test('Slack service shutdown cancels active text-engine generation without delivering', { timeout: 2000 }, async () => {
@@ -106,6 +106,21 @@ test('recovered generated output cannot cross a changed audience',async()=>{
  await f.adapter.recover();assert.equal(f.journal.get(delivered.id)?.state,'failed');
  assert.equal(f.posts.length,1);assert.equal(f.prompts.length,1);
  }finally{await f.close()}
+});
+
+test('Slack recovers generated top-level channel output without rerunning the provider', async () => {
+ const f=setup();
+ try {
+  const generate=f.engine.sendMessage;let output:TurnOutput|undefined;
+  f.engine.sendMessage=async(...args)=>{const result=await generate(...args);output=result;return result};
+  const handle=await f.adapter.receive(event('channel-recovery','1700000003.000000'));
+  const delivered=await handle!.completion;
+  assert.equal(delivered.input.conversation.kind,'channel');assert.ok(output?.audienceTag);
+  f.journal.put({...delivered,state:'generated',output,receipt:undefined});
+  await f.adapter.recover();
+  assert.equal(f.journal.get(delivered.id)?.state,'delivered');
+  assert.equal(f.posts.length,2);assert.equal(f.posts[1].thread_ts,undefined);assert.equal(f.prompts.length,1);
+ } finally {await f.close();}
 });
 
 for (const check of [1, 2]) test('Slack recovery preserves output when authorization check ' + check + ' is unavailable', async () => {
@@ -232,12 +247,12 @@ test('Slack caps new sessions before provider execution while existing sessions 
  const f=setup(2);
  try {
   for(let n=1;n<=3;n++) {
-   const turn=await f.adapter.receive(event('root-'+n,`170000000${n}.000000`));
+   const turn=await f.adapter.receive(event('root-'+n,`170000000${n}.000000`,`160000000${n}.000000`));
    assert.equal((await turn!.completion).state,n<=2?'delivered':'failed');
   }
   assert.equal(f.prompts.length,2);
   assert.equal(readdirSync(f.dir).filter(name=>name.endsWith('.json')).length,2);
-  const resumed=await f.adapter.receive(event('existing','1700000004.000000','1700000001.000000'));
+  const resumed=await f.adapter.receive(event('existing','1700000004.000000','1600000001.000000'));
   assert.equal((await resumed!.completion).state,'delivered');
   assert.equal(f.prompts.length,3);
  } finally {await f.close();}
@@ -297,7 +312,7 @@ for (const thread of [undefined, '1700000001.000000']) for (const sample of uplo
    };
    const payload=withFiles([fileMetadata(sample)],thread);
    const result=await (await f.adapter.receive(payload))!.completion;assert.equal(result.state,'delivered');
-   assert.equal(f.posts[0].thread_ts,thread??'1700000003.000000');assert.equal(f.posts[0].text,'inspected');
+    assert.equal(f.posts[0].thread_ts,thread);assert.equal(f.posts[0].text,'inspected');
    assert.equal(downloads,1);assert.ok(paths.every(p=>!existsSync(p)));
    await (await f.adapter.receive(payload))!.completion;assert.equal(downloads,1);
    assert.doesNotMatch(JSON.stringify(f.journal.all()),/files\.slack\.com/);
@@ -355,4 +370,90 @@ test('Slack successful downloads are cleaned after provider failure',async()=>{
   f.engine.sendMessage=async(_k,_p,files)=>{path=files![0].path;assert.ok(existsSync(path));throw Error('provider failed')};
   assert.equal((await (await f.adapter.receive(withFiles([fileMetadata()])))!.completion).state,'failed');assert.ok(path);assert.equal(existsSync(path),false);
  }finally{await f.close()}
+});
+
+for (const thread of [undefined, '1700000001.000000']) test('Slack posts text before exact provider bytes and completes all files in '+(thread?'a thread':'a channel'), async()=>{
+ const f=setup(); const calls:string[]=[]; const bytes:Buffer[]=[];
+ try {
+  const original=f.api.call;
+  f.api.call=async(method,args,signal)=>{
+   calls.push(method);
+   if(method==='files.getUploadURLExternal') return {ok:true,file_id:'F'+calls.filter(x=>x===method).length,upload_url:'https://files.slack.com/upload/v1/ticket'};
+   if(method==='files.completeUploadExternal') { assert.equal(args?.channel_id,'C');assert.equal(args?.thread_ts,thread);assert.deepEqual(JSON.parse(args!.files),[{id:'F1',title:'résumé?.txt'},{id:'F2',title:'two.bin'}]);return {ok:true,files:[{id:'F1'},{id:'F2'}]}; }
+   return original(method,args,signal);
+  };
+  f.api.uploadFile=async(url,data,signal)=>{calls.push('raw');assert.equal(url,'https://files.slack.com/upload/v1/ticket');assert.equal(signal.aborted,false);bytes.push(data);return new Response(null,{status:200});};
+  f.engine.sendMessage=async()=>({content:'text first',attachments:[{displayName:'résumé?.txt',data:Buffer.from([0,255,3])},{displayName:'two.bin',data:Buffer.from([4,5])}]});
+  const result=await (await f.adapter.receive(event('out-files','1700000003.000000',thread)))!.completion;
+  assert.equal(result.state,'delivered');assert.equal(f.posts[0].text,'text first');assert.equal(f.posts[0].thread_ts,thread);assert.deepEqual(bytes,[Buffer.from([0,255,3]),Buffer.from([4,5])]);
+  assert.deepEqual(result.receipt?.messageIds,['1900000009.000001','file:F1','file:F2']);
+  assert.deepEqual(calls.filter(call=>call==='chat.postMessage'||call==='raw'||call.startsWith('files.')),['chat.postMessage','files.getUploadURLExternal','files.getUploadURLExternal','raw','raw','files.completeUploadExternal']);
+ } finally { await f.close(); }
+});
+
+test('Slack attachment-only delivery has no text placeholder and rejects unsafe tickets without retry', async()=>{
+ const f=setup(); let generated=0, uploads=0;
+ try {
+  const original=f.api.call;
+  f.api.call=async(method,args,signal)=>method==='files.getUploadURLExternal'?{ok:true,file_id:'F1',upload_url:'https://evil.example/upload/v1/ticket'}:original(method,args,signal);
+  f.api.uploadFile=async()=>{uploads++;return new Response();};
+  f.engine.sendMessage=async()=>{generated++;return {content:'',attachments:[{displayName:'one.txt',data:Buffer.from('one')}]}};
+  const result=await (await f.adapter.receive(event('bad-ticket','1700000003.000000','1700000001.000000')))!.completion;
+  assert.equal(result.state,'interrupted');assert.equal(f.posts.length,0);assert.equal(uploads,0);assert.equal(generated,1);assert.ok(result.output);
+  await f.adapter.recover();assert.equal(generated,1);assert.equal(uploads,0);
+ } finally { await f.close(); }
+});
+
+test('Slack signed upload URLs reject unsafe targets and never receive bot authorization', async t => {
+ for (const url of ['http://files.slack.com/upload/v1/ticket','https://files.slack.com:444/upload/v1/ticket','https://token@files.slack.com/upload/v1/ticket','https://files.slack.com/files-pri/T-F1/file']) assert.throws(()=>slackUploadUrl(url));
+ t.mock.method(globalThis,'fetch',async(url: string|URL|Request,options?:RequestInit)=>{
+  assert.equal(String(url),'https://files.slack.com/upload/v1/ticket');assert.equal(options?.method,'POST');const headers=new Headers(options?.headers);assert.equal(headers.get('authorization'),null);assert.equal(headers.get('content-type'),'application/octet-stream');
+  assert.deepEqual(Buffer.from(await new Response(options?.body).arrayBuffer()),Buffer.from([0,255,1]));return new Response(null,{status:200});
+ });
+ const response=await new SlackWebApi('xoxb-secret').uploadFile('https://files.slack.com/upload/v1/ticket',Buffer.from([0,255,1]),new AbortController().signal);
+  assert.equal(response.ok,true);
+});
+
+for (const failure of ['ticket', 'transfer', 'completion', 'rate-limit'] as const) test('Slack retains attachment output after '+failure+' delivery failure without a retry', async()=>{
+ const f=setup(); let generated=0, uploads=0, completed=0, tickets=0;
+ try {
+  const original=f.api.call;
+  f.api.call=async(method,args,signal)=>{
+   if(method==='files.getUploadURLExternal') {
+    if(failure==='ticket') throw Error('ticket unavailable');
+    if(failure==='rate-limit') throw Error('Slack rate limited; retry after 1 seconds.');
+    return {ok:true,file_id:'F'+ ++tickets,upload_url:'https://files.slack.com/upload/v1/ticket'};
+   }
+   if(method==='files.completeUploadExternal') { completed++; return failure==='completion'?{ok:true,files:[{id:'F1'},{id:'F1'}]}:{ok:true,files:[{id:'F1'}]}; }
+   return original(method,args,signal);
+  };
+  f.api.uploadFile=async()=>{uploads++;return new Response(null,{status:failure==='transfer'?503:200});};
+  f.engine.sendMessage=async()=>{generated++;return {content:'text',attachments:[{displayName:'one.txt',data:Buffer.from('one')}]}};
+  const result=await (await f.adapter.receive(event('delivery-'+failure,'1700000003.000000','1700000001.000000')))!.completion;
+  assert.equal(result.state,'interrupted');assert.ok(result.output);assert.equal(generated,1);assert.equal(uploads,failure==='ticket'||failure==='rate-limit'?0:1);assert.equal(completed,failure==='completion'?1:0);
+  await f.adapter.recover();assert.equal(generated,1);assert.equal(uploads,failure==='ticket'||failure==='rate-limit'?0:1);
+ } finally { await f.close(); }
+});
+
+test('Slack cancellation during raw upload retains output and does not retry it', {timeout:2000}, async()=>{
+ const f=setup(); let generated=0, uploadSignal:AbortSignal|undefined;
+ try {
+  const original=f.api.call;
+  f.api.call=async(method,args,signal)=>method==='files.getUploadURLExternal'?{ok:true,file_id:'F1',upload_url:'https://files.slack.com/upload/v1/ticket'}:original(method,args,signal);
+  let began!:()=>void;const started=new Promise<void>(resolve=>{began=resolve});
+  f.api.uploadFile=async(_url,_data,signal)=>{uploadSignal=signal;began();return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));};
+  f.engine.sendMessage=async()=>{generated++;return {content:'',attachments:[{displayName:'one.txt',data:Buffer.from('one')}]}};
+  const turn=await f.adapter.receive(event('cancel-upload','1700000003.000000','1700000001.000000'));await started;await f.service.shutdown();
+  const result=await turn!.completion;assert.equal(result.state,'interrupted');assert.equal(uploadSignal!.aborted,true);assert.ok(result.output);await f.adapter.recover();assert.equal(generated,1);
+ } finally { await f.close(); }
+});
+
+test('Slack delivery-time authorization failure starts no attachment upload', async()=>{
+ const f=setup(); let uploads=0;
+ try {
+  f.api.uploadFile=async()=>{uploads++;return new Response();};
+  f.engine.sendMessage=async()=>{f.revoke();return {content:'',attachments:[{displayName:'one.txt',data:Buffer.from('one')}]}};
+  const result=await (await f.adapter.receive(event('delivery-revoked','1700000003.000000','1700000001.000000')))!.completion;
+  assert.equal(result.state,'failed');assert.equal(uploads,0);
+ } finally { await f.close(); }
 });

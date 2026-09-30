@@ -6,7 +6,7 @@ import { resolve, dirname, join } from "path";
 import { homedir, tmpdir } from "os";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-import { setupSecurityMode, setupSitesEnabled } from "./common/providerSecurity.js";
+import { setupCodexWebSearchMode, setupSecurityMode, setupSitesEnabled } from "./common/providerSecurity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname_local = dirname(__filename);
@@ -199,9 +199,25 @@ async function setup(): Promise<void> {
       existing,
       false
     );
+    const requestedWebSearchMode = await promptVar(
+      rl,
+      "Codex hosted web search (disabled | cached | indexed | live; default cached)",
+      "CODEX_WEB_SEARCH_MODE",
+      existing,
+      false
+    );
+    let webSearchMode;
+    try {
+      webSearchMode = setupCodexWebSearchMode(requestedWebSearchMode);
+    } catch (err) {
+      console.error(`\n❌ ${err instanceof Error ? err.message : String(err)}`);
+      rl.close();
+      process.exit(1);
+    }
     lines.push(openaiKey ? `OPENAI_API_KEY=${openaiKey}` : "# OPENAI_API_KEY=");
     if (codexModel) lines.push(`CODEX_MODEL=${codexModel}`);
     if (codexTimeout) lines.push(`CODEX_TIMEOUT_MS=${codexTimeout}`);
+    lines.push(`CODEX_WEB_SEARCH_MODE=${webSearchMode}`);
   } else if (provider === "opencode") {
     const opencodeModel = await promptVar(
       rl,
@@ -228,6 +244,13 @@ async function setup(): Promise<void> {
       false
     );
     if (copilotTimeout) lines.push(`COPILOT_TIMEOUT_MS=${copilotTimeout}`);
+  }
+
+  // Do not erase a Codex choice when editing an installation that currently
+  // selects another provider. It is intentionally not validated until Codex
+  // is selected, so an irrelevant stale value cannot block non-Codex setup.
+  if (provider !== "codex" && existing.CODEX_WEB_SEARCH_MODE !== undefined) {
+    lines.push(`CODEX_WEB_SEARCH_MODE=${existing.CODEX_WEB_SEARCH_MODE}`);
   }
 
   const progressInterval = await promptVar(

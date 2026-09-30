@@ -8,11 +8,21 @@ import { TEXT_CAPABILITIES, sessionKey, type IncomingTurn, type TurnHandle, type
 import { createTextEngine, type TextEngine } from '../composition/textEngine.js';
 import { configuredSecurityMode } from '../common/providerSecurity.js';
 export interface SlackResponse { ok: boolean; error?: string; [key: string]: unknown }
-export interface SlackApi { downloadFile?(url: string, signal: AbortSignal): Promise<Response>; call(method: string, args?: Record<string, string>, signal?: AbortSignal): Promise<SlackResponse> }
+export interface SlackApi {
+  downloadFile?(url: string, signal: AbortSignal): Promise<Response>;
+  /** Posts raw bytes to a validated Slack signed-upload URL, without credentials. */
+  uploadFile?(url: string, data: Buffer, signal: AbortSignal): Promise<Response>;
+  call(method: string, args?: Record<string, string>, signal?: AbortSignal): Promise<SlackResponse>;
+}
 /** Credentials remain in this host client, never in provider context or persisted turns. */
 export class SlackWebApi implements SlackApi {
   constructor(private readonly token: string) {}
   downloadFile(url: string, signal: AbortSignal): Promise<Response> { return fetchSlackFile(this.token, url, signal); }
+  uploadFile(url: string, data: Buffer, signal: AbortSignal): Promise<Response> {
+    const bytes = new Uint8Array(data);
+    return fetch(slackUploadUrl(url), { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: bytes.buffer,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
+  }
   async call(method: string, args: Record<string,string> = {}, signal?: AbortSignal): Promise<SlackResponse> {
     const response = await fetch('https://slack.com/api/' + method, {
       method: 'POST', headers: { authorization: 'Bearer ' + this.token, 'content-type': 'application/x-www-form-urlencoded' },
@@ -28,6 +38,23 @@ export class SlackWebApi implements SlackApi {
 export function slackPosition(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{10,}\.[0-9]{6}$/.test(value)) throw new Error('Invalid Slack message timestamp.');
   return value;
+}
+/** Slack upload tickets must be first-party HTTPS URLs; tokens never accompany this request. */
+export function slackUploadUrl(value: string): URL {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' || url.port || url.username || url.password || !url.pathname.startsWith('/upload/v1/')) {
+    throw new Error('Invalid Slack upload URL.');
+  }
+  return url;
+}
+export function slackOutputName(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Invalid attachment name.');
+  // Match the provider artifact sanitizer: retain valid Unicode and punctuation,
+  // while removing transport-breaking controls at this independently trusted boundary.
+  const name = value.replace(/[\r\n\0]/g, '_').trim();
+  if (name.includes('/') || name.includes('\\')) throw new Error('Invalid attachment name.');
+  if (!name || name === '.' || name === '..') throw new Error('Invalid attachment name.');
+  return name;
 }
 export function comparePosition(a: string, b: string): number {
   const left = BigInt(slackPosition(a).replace('.', '')), right = BigInt(slackPosition(b).replace('.', ''));
@@ -122,10 +149,10 @@ export class SlackAdapter {
     if (!e || e.type !== 'app_mention' || e.bot_id || (e.subtype && e.subtype !== 'file_share') || e.user === this.config.botUserId
       || typeof e.user !== 'string' || typeof e.channel !== 'string' || !this.config.channels.has(e.channel)
       || !this.config.users.has(e.user) || typeof e.text !== 'string' || !e.text.includes('<@' + this.config.botUserId + '>')) return;
-    const ts = slackPosition(e.ts), thread = e.thread_ts ? slackPosition(e.thread_ts) : ts;
+    const ts = slackPosition(e.ts), thread = e.thread_ts ? slackPosition(e.thread_ts) : undefined;
     return { eventId: payload.event_id, sourceMessageId: ts, text: e.text.split('<@' + this.config.botUserId + '>').join('').trim(),
       receivedAt: new Date(Number(ts) * 1000).toISOString(), actor: { platform: 'slack', tenantId: this.config.teamId, userId: e.user },
-      conversation: { platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId, channelId: e.channel, threadId: thread, kind: 'thread' } };
+      conversation: { platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId, channelId: e.channel, ...(thread ? { threadId: thread, kind: 'thread' as const } : { kind: 'channel' as const }) } };
   }
   private async audience(input: IncomingTurn, signal?: AbortSignal): Promise<string | undefined> {
     signal?.throwIfAborted();
@@ -169,7 +196,7 @@ export class SlackAdapter {
       signal?.throwIfAborted();
       const conversation = input.conversation;
       if (conversation.platform !== 'slack' || conversation.tenantId !== this.config.teamId
-        || conversation.installationId !== this.config.installationId || conversation.kind !== 'thread'
+        || conversation.installationId !== this.config.installationId || !['channel', 'thread'].includes(conversation.kind)
         || !this.config.channels.has(conversation.channelId) || !this.config.users.has(input.actor.userId)) continue;
       const handle = await this.submit(input);
       const result = await handle.completion;
@@ -230,7 +257,7 @@ export class SlackAdapter {
         if (!sourceFingerprint) throw new Error('Recovered turns may only deliver persisted output.');
         if (prepared.uploads.fileAttachments.length && !await authorized(signal)) throw new Error('Conversation access denied.');
         const response = await this.engine.sendMessage(session, prepared.prompt, prepared.uploads.fileAttachments.length ? prepared.uploads.fileAttachments : undefined, {
-          transportContext: { platform: 'slack', history: true }, signal, onProgress,
+          transportContext: { platform: 'slack', history: true, attachments: true }, signal, onProgress,
           onSessionRecovery: () => {
             signal.throwIfAborted();
             prepared.next.represented = [input.sourceMessageId!];
@@ -264,15 +291,42 @@ export class SlackAdapter {
         if (prepared.coverage.status === 'partial' || prepared.coverage.status === 'unavailable') response.content += '\n\n[Surrounding discussion context is ' + prepared.coverage.status + ': ' + prepared.coverage.reasons.join('; ') + ']';
         return response;
       },
-      deliver: async (output, deliveryKey) => {
-        const text = output.content + (output.attachments.length ? '\n[File delivery is unavailable in Slack.]' : '');
-        const chars = Array.from(text || '(No text response)'); const ids: string[] = [];
+      deliver: async (output, deliveryKey, _session, signal) => {
+        const text = output.content;
+        const chars = Array.from(text || (output.attachments.length ? '' : '(No text response)')); const ids: string[] = [];
         const sent: Array<{ position: string; text: string }> = [];
         for (let offset = 0; offset < chars.length; offset += 3000) {
-          const result = await this.api.call('chat.postMessage', { channel: input.conversation.channelId, thread_ts: input.conversation.threadId!,
+          signal.throwIfAborted();
+          const result = await this.api.call('chat.postMessage', { channel: input.conversation.channelId, ...(input.conversation.threadId ? { thread_ts: input.conversation.threadId } : {}),
             text: chars.slice(offset, offset + 3000).join(''), parse: 'none', unfurl_links: 'false', unfurl_media: 'false',
             client_msg_id: createHash('sha256').update(deliveryKey + ':' + offset).digest('hex').slice(0,32).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5') });
           if (typeof result.ts === 'string') { ids.push(result.ts); sent.push({ position: result.ts, text: chars.slice(offset, offset + 3000).join('') }); }
+        }
+        if (output.attachments.length) {
+          if (!this.api.uploadFile) throw new Error('Slack file uploads are unavailable.');
+          const tickets: Array<{ id: string; title: string; uploadUrl: string; data: Buffer }> = [];
+          for (const attachment of output.attachments) {
+            signal.throwIfAborted();
+            if (!Buffer.isBuffer(attachment.data) || attachment.data.length === 0) throw new Error('Empty Slack attachment.');
+            const name = slackOutputName(attachment.displayName);
+            const ticket = await this.api.call('files.getUploadURLExternal', { filename: name, length: String(attachment.data.length) }, signal);
+            if (typeof ticket.upload_url !== 'string' || typeof ticket.file_id !== 'string' || !ticket.file_id) throw new Error('Incomplete Slack upload ticket.');
+            if (tickets.some(existing => existing.id === ticket.file_id)) throw new Error('Incomplete Slack upload ticket.');
+            tickets.push({ id: ticket.file_id, title: name, uploadUrl: slackUploadUrl(ticket.upload_url).href, data: attachment.data });
+          }
+          for (const ticket of tickets) {
+            signal.throwIfAborted();
+            const response = await this.api.uploadFile(ticket.uploadUrl, ticket.data, signal);
+            if (!response.ok) throw new Error('Slack file transfer failed (HTTP ' + response.status + ').');
+          }
+          signal.throwIfAborted();
+          const completed = await this.api.call('files.completeUploadExternal', { channel_id: input.conversation.channelId,
+            ...(input.conversation.threadId ? { thread_ts: input.conversation.threadId } : {}), files: JSON.stringify(tickets.map(file => ({ id: file.id, title: file.title }))) }, signal);
+          const completedFiles = Array.isArray(completed.files) ? completed.files : [];
+          if (completedFiles.length !== tickets.length) throw new Error('Incomplete Slack upload completion.');
+          const returned = new Set((completedFiles as Record<string, unknown>[]).map(file => typeof file.id === 'string' ? file.id : ''));
+          if (returned.size !== tickets.length || tickets.some(ticket => !returned.has(ticket.id))) throw new Error('Incomplete Slack upload completion.');
+          ids.push(...tickets.map(ticket => 'file:' + ticket.id));
         }
         const state = this.load(key); state.represented = [...(state.represented ?? []), ...ids]; state.scopes ??= {};
         for (const message of sent) {
@@ -372,4 +426,3 @@ export async function startSlack(signal?: AbortSignal): Promise<{ stop(): Promis
     throw error;
   }
 }
-

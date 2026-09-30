@@ -127,7 +127,7 @@ async function sendUntilIdle(session, message, options) {
                 lastAssistantMessage = event.data.content;
             }
             else if (event.type === "session.idle") {
-                finish(() => resolve(lastAssistantMessage ?? "(no response)"));
+                finish(() => resolve(lastAssistantMessage ?? (options?.transportContext?.attachments ? "" : "(no response)")));
             }
             else if (event.type === "session.error") {
                 finish(() => reject(new Error(event.data.message)));
@@ -366,7 +366,7 @@ export class CopilotProvider {
                             prompt: githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(basePrompt, rulesetRuntime) : basePrompt, githubRun),
                             ...(attachments?.length ? { attachments } : {}),
                         }, options);
-                    }))));
+                    }), Boolean(options?.transportContext?.attachments))));
                 }
                 catch (error) {
                     if (options?.signal?.aborted || (error instanceof RunTimeoutError && !error.cancellationConfirmed)) {
