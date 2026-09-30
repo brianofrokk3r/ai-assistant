@@ -7,6 +7,7 @@ import { ConversationService, FileTurnJournal, historyBlock, historyRange, retri
 import { TEXT_CAPABILITIES, sessionKey } from '../core/conversation.js';
 import { createTextEngine } from '../composition/textEngine.js';
 import { configuredSecurityMode } from '../common/providerSecurity.js';
+import { classifyChat } from '../common/chatClassification.js';
 /** Credentials remain in this host client, never in provider context or persisted turns. */
 export class SlackWebApi {
     token;
@@ -182,21 +183,45 @@ export class SlackAdapter {
         if (payload.team_id !== this.config.teamId || typeof payload.event_id !== 'string')
             return;
         const e = payload.event;
-        if (!e || e.type !== 'app_mention' || e.bot_id || (e.subtype && e.subtype !== 'file_share') || e.user === this.config.botUserId
-            || typeof e.user !== 'string' || typeof e.channel !== 'string' || !this.config.channels.has(e.channel)
-            || !this.config.users.has(e.user) || typeof e.text !== 'string' || !e.text.includes('<@' + this.config.botUserId + '>'))
+        if (!e || e.bot_id || (e.subtype && e.subtype !== 'file_share') || e.user === this.config.botUserId
+            || typeof e.user !== 'string' || typeof e.channel !== 'string' || !this.config.users.has(e.user) || typeof e.text !== 'string')
             return;
-        const ts = slackPosition(e.ts), thread = e.thread_ts ? slackPosition(e.thread_ts) : undefined;
-        return { eventId: payload.event_id, sourceMessageId: ts, text: e.text.split('<@' + this.config.botUserId + '>').join('').trim(),
+        // A one-to-one direct message is addressed to the assistant by construction and
+        // needs no mention; its individual counterpart must be allowlisted. Every other
+        // admitted form is an explicit mention in an allowlisted channel.
+        const direct = e.type === 'message' && e.channel_type === 'im' && /^D[A-Z0-9]*$/.test(e.channel);
+        if (!direct && (e.type !== 'app_mention' || !this.config.channels.has(e.channel) || !e.text.includes('<@' + this.config.botUserId + '>')))
+            return;
+        const ts = slackPosition(e.ts);
+        // Direct messages stay one conversation; a self-referencing thread_ts is the same root.
+        const thread = !direct && e.thread_ts ? slackPosition(e.thread_ts) : undefined;
+        return { eventId: payload.event_id, sourceMessageId: ts, text: direct ? e.text.trim() : e.text.split('<@' + this.config.botUserId + '>').join('').trim(),
             receivedAt: new Date(Number(ts) * 1000).toISOString(), actor: { platform: 'slack', tenantId: this.config.teamId, userId: e.user },
-            conversation: { platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId, channelId: e.channel, ...(thread ? { threadId: thread, kind: 'thread' } : { kind: 'channel' }) } };
+            conversation: { platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId, channelId: e.channel,
+                ...(thread ? { threadId: thread, kind: 'thread' } : { kind: direct ? 'direct' : 'channel' }) } };
+    }
+    /**
+     * Host-derived classification of the conversation form. A form this transport
+     * cannot address is reported and rejected; it is never guessed at.
+     */
+    classify(reference) {
+        try {
+            return classifyChat(reference);
+        }
+        catch (error) {
+            console.error('[slack] Unsupported conversation form: ' + (error instanceof Error ? error.message : String(error)));
+            throw error;
+        }
     }
     async audience(input, signal) {
         signal?.throwIfAborted();
         const info = await this.api.call('conversations.info', { channel: input.conversation.channelId }, signal);
         const channel = info.channel;
-        // Shared/external channels and DMs require a separate visibility policy.
-        if (!channel || channel.is_im || channel.is_mpim || channel.is_ext_shared || channel.is_org_shared || !channel.is_member)
+        // Group DMs and shared/external channels remain denied. A one-to-one direct
+        // message is admitted only as the individual conversation it actually is.
+        if (!channel || channel.is_mpim || channel.is_ext_shared || channel.is_org_shared || !channel.is_member)
+            return;
+        if (input.conversation.kind === 'direct' ? !channel.is_im : channel.is_im)
             return;
         const members = new Set();
         let cursor;
@@ -212,6 +237,10 @@ export class SlackAdapter {
         if (cursor)
             throw new Error('Cannot establish the complete channel audience.');
         if (!members.has(input.actor.userId) || !members.has(this.config.botUserId))
+            return;
+        // Every extra participant turns an admitted direct message into a shared
+        // conversation; it must never inherit the counterpart's individual session.
+        if (input.conversation.kind === 'direct' && [...members].some(id => id !== input.actor.userId && id !== this.config.botUserId))
             return;
         return createHash('sha256').update(JSON.stringify([...members].sort())).digest('hex');
     }
@@ -250,9 +279,21 @@ export class SlackAdapter {
             signal?.throwIfAborted();
             const conversation = input.conversation;
             if (conversation.platform !== 'slack' || conversation.tenantId !== this.config.teamId
-                || conversation.installationId !== this.config.installationId || !['channel', 'thread'].includes(conversation.kind)
-                || !this.config.channels.has(conversation.channelId) || !this.config.users.has(input.actor.userId))
+                || conversation.installationId !== this.config.installationId || !['channel', 'thread', 'direct'].includes(conversation.kind)
+                || !this.config.users.has(input.actor.userId))
                 continue;
+            // Direct messages are gated by their allowlisted counterpart; every other form
+            // additionally needs its channel in the allowlist.
+            if (conversation.kind !== 'direct' && !this.config.channels.has(conversation.channelId))
+                continue;
+            // Replayed output must still be a form this transport can address. A record
+            // that no longer resolves to a deliverable conversation is never guessed at.
+            try {
+                this.classify(conversation);
+            }
+            catch {
+                continue;
+            }
             const handle = await this.submit(input);
             const result = await handle.completion;
             if (result.state !== 'delivered')
@@ -260,7 +301,8 @@ export class SlackAdapter {
         }
     }
     submit(input, sourceFingerprint, files) {
-        const key = sessionKey(input, 'shared');
+        const sessionAudience = input.conversation.kind === 'direct' ? 'individual' : 'shared';
+        const key = sessionKey(input, sessionAudience);
         let audience;
         const authorized = async (signal) => {
             const current = await this.audience(input, signal);
@@ -269,7 +311,7 @@ export class SlackAdapter {
         const port = new SlackHistory(this.historyApi, input.conversation, authorized, this.config.excludedAuthors);
         return this.service.submit(input, {
             platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId,
-            audience: 'shared', capabilities: { ...TEXT_CAPABILITIES, history: true, attachments: true, progress: false },
+            audience: sessionAudience, capabilities: { ...TEXT_CAPABILITIES, history: true, attachments: true, progress: false, directMessages: true },
             retryGeneratedDelivery: true,
             authorize: async (_i, stage, output, signal) => {
                 if (stage === 'ingress')
@@ -284,6 +326,8 @@ export class SlackAdapter {
                 audience = await this.audience(input, signal);
                 if (!audience)
                     throw new Error('Conversation access denied.');
+                // Classify the host-verified conversation before any context reaches the agent.
+                const classification = this.classify(input.conversation);
                 const state = this.load(session);
                 state.represented ??= [];
                 state.scopes ??= {};
@@ -314,7 +358,7 @@ export class SlackAdapter {
                 const prompt = historyBlock({ ...result, messages: fresh, coverage: { ...result.coverage, included: fresh.length, reasons: [...result.coverage.reasons, ...(fresh.length !== result.messages.length ? ['Previously supplied records retained in this provider session.'] : [])] } }) + '\n\nCurrent speaker (host-verified): ' + JSON.stringify(input.actor) + '\nCurrent request:\n' + input.text;
                 const uploads = await prepareSlackFiles(files, this.api, signal);
                 const attachmentWarning = uploads.warnings.length ? '\n\n[Slack attachment warnings: ' + uploads.warnings.join('; ') + ']' : '';
-                return { prompt: prompt + attachmentWarning, next, coverage: result.coverage, history: result, scope: historyScope(resource), uploads, attachmentWarning, cleanup: uploads.cleanup };
+                return { prompt: prompt + attachmentWarning, classification, next, coverage: result.coverage, history: result, scope: historyScope(resource), uploads, attachmentWarning, cleanup: uploads.cleanup };
             },
             generate: async (prepared, session, signal, onProgress) => {
                 if (!sourceFingerprint)
@@ -322,7 +366,7 @@ export class SlackAdapter {
                 if (prepared.uploads.fileAttachments.length && !await authorized(signal))
                     throw new Error('Conversation access denied.');
                 const response = await this.engine.sendMessage(session, prepared.prompt, prepared.uploads.fileAttachments.length ? prepared.uploads.fileAttachments : undefined, {
-                    transportContext: { platform: 'slack', history: true, attachments: true }, signal, onProgress,
+                    transportContext: { platform: 'slack', history: true, attachments: true, classification: prepared.classification }, signal, onProgress,
                     onSessionRecovery: () => {
                         signal.throwIfAborted();
                         prepared.next.represented = [input.sourceMessageId];
@@ -334,7 +378,12 @@ export class SlackAdapter {
                     resolveChannelHistory: async (args, signal) => {
                         if (args.scope && !['channel', 'thread'].includes(String(args.scope)))
                             throw new Error('Unsupported history scope.');
-                        const resource = args.scope === 'channel' ? { ...input.conversation, kind: 'channel', threadId: undefined } : input.conversation;
+                        // A direct message is a single conversation: channel scope is itself and
+                        // there is no thread scope to narrow.
+                        if (input.conversation.kind === 'direct' && args.scope === 'thread')
+                            throw new Error('Unsupported history scope.');
+                        const resource = args.scope === 'channel' && input.conversation.kind !== 'direct'
+                            ? { ...input.conversation, kind: 'channel', threadId: undefined } : input.conversation;
                         const range = historyRange(args, input, port, resource);
                         const result = await retrieveHistory(port, input, resource, range, signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000));
                         for (const message of result.messages) {
