@@ -12,6 +12,7 @@ import { CodexProvider } from "../src/providers/codex.js";
 import { OpenCodeProvider } from "../src/providers/opencode.js";
 import { RunTimeoutError, UnsupportedError } from "../src/providers/types.js";
 import { ProviderStore } from "../src/common/providerStore.js";
+import { SENSITIVE_DIRECTORY_NAME_LIST } from "../src/common/providerSecurity.js";
 
 for (const cooperative of [true, false]) test(`Codex host cancellation settles generation (cooperative=${cooperative})`, { timeout: 3000 }, async t => {
   const previous = process.env.AI_CANCELLATION_GRACE_MS;
@@ -144,17 +145,22 @@ test("Codex provider reads the default reasoning effort from the environment", a
   }
 });
 
-test("Codex prepares fresh shared workspaces before starting a thread", async t => {
+test("Codex starts threads in fresh and legacy shared workspaces", async t => {
   const previousMode = process.env.AI_ASSISTANT_SECURITY_MODE;
   const previousRoot = process.env.AI_ASSISTANT_WORKSPACE_ROOT;
   const root = mkdtempSync(join(tmpdir(), "codex-fresh-workspace-"));
   process.env.AI_ASSISTANT_SECURITY_MODE = "shared";
   process.env.AI_ASSISTANT_WORKSPACE_ROOT = root;
   let expectedWorkspace = root;
+  let expectedLegacyFiles = false;
   const codex = new CodexProvider(() => ({
     startThread: options => {
       assert.equal(options?.workingDirectory, expectedWorkspace);
-      assert.equal(statSync(join(expectedWorkspace, ".codex")).isDirectory(), true);
+      for (const name of SENSITIVE_DIRECTORY_NAME_LIST) {
+        const state = statSync(join(expectedWorkspace, name));
+        assert.equal(state.isDirectory(), !expectedLegacyFiles);
+        if (expectedLegacyFiles) assert.equal(state.size, 0);
+      }
       return { run: async () => ({ finalResponse: "Ready", items: [] }) } as unknown as Thread;
     },
     resumeThread: () => { throw new Error("Unexpected resume"); },
@@ -167,13 +173,19 @@ test("Codex prepares fresh shared workspaces before starting a thread", async t 
     else process.env.AI_ASSISTANT_WORKSPACE_ROOT = previousRoot;
     rmSync(root, { recursive: true, force: true });
   });
-  for (const key of ["default-workspace", "scheduled-workspace"]) {
-    const workspace = key === "default-workspace" ? root : join(root, ".scheduled-runs", "run-fresh");
-    if (key === "scheduled-workspace") {
+  for (const key of ["default-workspace", "scheduled-workspace", "legacy-workspace"]) {
+    const workspace = key === "default-workspace" ? root : join(root, ".scheduled-runs", key);
+    if (key !== "default-workspace") {
       mkdirSync(workspace, { recursive: true });
       codex.setSessionWorkingDir(key, workspace);
     }
-    assert.equal(existsSync(join(workspace, ".codex")), false);
+    expectedLegacyFiles = key === "legacy-workspace";
+    if (expectedLegacyFiles) {
+      for (const name of SENSITIVE_DIRECTORY_NAME_LIST) {
+        writeFileSync(join(workspace, name), "", { mode: 0o444 });
+      }
+    }
+    assert.equal(existsSync(join(workspace, ".codex")), expectedLegacyFiles);
     expectedWorkspace = workspace;
     assert.equal((await codex.sendMessage(key, "Check workspace")).content, "Ready");
   }

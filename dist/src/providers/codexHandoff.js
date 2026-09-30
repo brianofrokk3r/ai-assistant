@@ -49,7 +49,9 @@ export async function summarizeHandoff(thread, signal) {
         signal.throwIfAborted();
         const summary = await thread.run(prompt, { signal, outputSchema: HANDOFF_SCHEMA });
         signal.throwIfAborted();
-        if (summary.items.some(item => item.type !== "agent_message" && item.type !== "reasoning")) {
+        // SDK error items are non-fatal diagnostics, not tool operations. Failed turns
+        // reject run(); successful turns must still provide a valid bounded summary.
+        if (summary.items.some(item => item.type !== "agent_message" && item.type !== "reasoning" && item.type !== "error")) {
             throw new Error("Codex handoff attempted a tool operation; the existing session has been retained.");
         }
         return parseHandoff(summary.finalResponse);
