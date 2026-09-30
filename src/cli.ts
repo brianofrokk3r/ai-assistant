@@ -247,9 +247,10 @@ async function setup(): Promise<void> {
   }
 
   // Do not erase a Codex choice when editing an installation that currently
-  // selects another provider.
+  // selects another provider. It is intentionally not validated until Codex
+  // is selected, so an irrelevant stale value cannot block non-Codex setup.
   if (provider !== "codex" && existing.CODEX_WEB_SEARCH_MODE !== undefined) {
-    lines.push(`CODEX_WEB_SEARCH_MODE=${setupCodexWebSearchMode(existing.CODEX_WEB_SEARCH_MODE)}`);
+    lines.push(`CODEX_WEB_SEARCH_MODE=${existing.CODEX_WEB_SEARCH_MODE}`);
   }
 
   const progressInterval = await promptVar(

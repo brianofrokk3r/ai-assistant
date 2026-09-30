@@ -92,12 +92,31 @@ test("shared startup reports hosted search separately from sandboxed-command net
   const lines: string[] = [];
   t.mock.method(console, "log", (line: string) => { lines.push(line); });
   reportProviderSecurityConfiguration({
+    PROVIDER: "codex",
     AI_ASSISTANT_SECURITY_MODE: "shared",
     AI_ASSISTANT_ENABLE_SITES: "false",
     CODEX_WEB_SEARCH_MODE: "live",
   });
   assert.ok(lines.some(line => /hosted web search: live/i.test(line)));
-  assert.ok(lines.some(line => /Sandboxed-command network access: package registry only/i.test(line)));
+  assert.ok(lines.some(line => /sandboxed-command network access: package registry only/i.test(line)));
+  assert.equal(lines.filter(line => /hosted web search|sandboxed-command network access/i.test(line)).length, 2);
+});
+
+test("non-Codex startup diagnostics ignore invalid Codex hosted-search configuration", t => {
+  const lines: string[] = [];
+  t.mock.method(console, "log", (line: string) => { lines.push(line); });
+  t.mock.method(console, "warn", (line: string) => { lines.push(line); });
+  for (const provider of ["copilot", "opencode"]) {
+    for (const securityMode of ["shared", "unrestricted"]) {
+      assert.doesNotThrow(() => reportProviderSecurityConfiguration({
+        PROVIDER: provider,
+        AI_ASSISTANT_SECURITY_MODE: securityMode,
+        AI_ASSISTANT_ENABLE_SITES: "false",
+        CODEX_WEB_SEARCH_MODE: "not-a-mode",
+      }));
+    }
+  }
+  assert.equal(lines.some(line => /Codex hosted web search|sandboxed-command network access/i.test(line)), false);
 });
 
 test("shared provider child environments never inherit Discord or MCP secrets", () => {

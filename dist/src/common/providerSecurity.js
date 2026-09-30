@@ -52,7 +52,10 @@ export function setupCodexWebSearchMode(configured) {
 export function reportProviderSecurityConfiguration(source = process.env) {
     const mode = configuredSecurityMode(source);
     const sitesEnabled = configuredSitesEnabled(source);
-    const webSearchMode = configuredCodexWebSearchMode(source);
+    // CODEX_WEB_SEARCH_MODE belongs to the Codex provider. Other providers must
+    // remain startable when an installation retains a stale Codex-only value.
+    const provider = source.PROVIDER?.trim().toLowerCase() || "copilot";
+    const webSearchMode = provider === "codex" ? configuredCodexWebSearchMode(source) : undefined;
     if (mode === "unrestricted") {
         console.warn("[security] AI_ASSISTANT_SECURITY_MODE=unrestricted: Discord sessions retain the provider's full legacy capabilities and may act with the operator's connected identities. Use this only on a private, trusted server.");
         return;
@@ -63,7 +66,10 @@ export function reportProviderSecurityConfiguration(source = process.env) {
     else {
         console.log("[security] Shared provider isolation is active; external mutation is disabled.");
     }
-    console.log(`[security] Codex hosted web search: ${webSearchMode}. Sandboxed-command network access: package registry only${sitesEnabled ? " plus ChatGPT Sites source pushes" : ""}.`);
+    if (webSearchMode) {
+        console.log(`[security] Codex hosted web search: ${webSearchMode}.`);
+        console.log(`[security] Codex sandboxed-command network access: package registry only${sitesEnabled ? " plus ChatGPT Sites source pushes" : ""}.`);
+    }
 }
 const COMMON_ENVIRONMENT_KEYS = [
     "PATH",
