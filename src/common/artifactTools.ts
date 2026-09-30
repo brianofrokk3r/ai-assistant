@@ -56,7 +56,7 @@ export class ArtifactTools {
   call(name: string, args: Record<string, unknown>): Promise<unknown> {
     const operation = this.queue.catch(() => {}).then(async () => {
       this.controller.signal.throwIfAborted();
-      if (this.options?.transportContext && !(name === 'fetch_webpage' || (name === 'fetch_channel_history' && this.options.transportContext.history))) throw new Error('Tool unavailable for this transport.');
+      if (this.options?.transportContext && !(name === 'fetch_webpage' || (name === 'fetch_channel_history' && this.options.transportContext.history) || (name === 'attach_file' && this.options.transportContext.attachments))) throw new Error('Tool unavailable for this transport.');
       if (args.run_id !== this.id) throw new Error("This artifact run has expired or belongs to another response.");
       if (++this.calls > 80) throw new Error("Artifact tool call limit reached for this response.");
       const schema = ARTIFACT_TOOLS.find((tool) => tool.name === name)?.inputSchema;
@@ -287,4 +287,3 @@ async function readRegularFile(file: string, limit: number): Promise<Buffer> {
     return data.subarray(0, offset);
   } finally { await handle.close(); }
 }
-

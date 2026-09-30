@@ -17,7 +17,7 @@ for (const mode of ['shared', 'unrestricted']) for (const platform of ['slack', 
   const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
   t.after(()=>{for(const [key,value] of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value}});
   Object.assign(process.env,values);
-  const transportContext={platform,history:platform==='slack'};
+  const transportContext={platform,history:platform==='slack',attachments:platform==='slack'};
   const enabled=resolveSessionContext({transportContext});
   assert.equal(enabled.sitesEnabled,false);
   assert.doesNotMatch(enabled.systemPrompt,/except for ChatGPT Sites/);
@@ -37,6 +37,14 @@ for (const mode of ['shared', 'unrestricted']) for (const platform of ['slack', 
   provider.setSessionWorkingDir('conversation',directory);
   assert.equal((await provider.sendMessage('conversation','hello',undefined,{transportContext})).content,'ready');
   assert.equal(clients,1);
+});
+
+test('attachment transport capability changes the session context fingerprint', () => {
+  const withoutFiles = resolveSessionContext({ transportContext: { platform: 'slack', history: true, attachments: false } });
+  const withFiles = resolveSessionContext({ transportContext: { platform: 'slack', history: true, attachments: true } });
+  assert.notEqual(withFiles.fingerprint, withoutFiles.fingerprint);
+  assert.match(withFiles.systemPrompt, /attach validated files/);
+  assert.doesNotMatch(withoutFiles.systemPrompt, /attach validated files/);
 });
 
 for (const scenario of [
