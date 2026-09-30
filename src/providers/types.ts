@@ -1,5 +1,5 @@
 import type { LookupRecord } from "../utils/fetchWebpage.js";
-import type { ContextProfile } from "../common/sessionContext.js";
+import type { ContextProfile, TransportContext } from "../common/sessionContext.js";
 import type { AccessPolicy, AccessSubject } from "../common/accessPolicy.js";
 import type { UserInstructionContext } from "../utils/userInstructions.js";
 
@@ -95,7 +95,7 @@ export interface SendMessageOptions {
   /** Rebuild host context before retrying a turn in a replacement native session. */
   onSessionRecovery?: () => string;
   /** Host-selected transport. Omitted preserves the Discord compatibility profile. */
-  transportContext?: { platform: "slack" | "cli"; history: boolean; attachments: boolean };
+  transportContext?: TransportContext;
   contextProfile?: ContextProfile;
   /** Host-selected cap; never extends the provider timeout. */
   timeoutMs?: number;

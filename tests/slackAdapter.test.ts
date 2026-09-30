@@ -7,7 +7,11 @@ import type { SendMessageOptions, SendAttachment } from '../src/providers/types.
 import type { TurnOutput } from '../src/core/conversation.js';
 import { SlackAdapter, SlackWebApi, slackUploadUrl, type SlackApi } from '../src/adapters/slack.js';
 import { ConversationService, MemoryTurnJournal } from '../src/application/conversationService.js';
+import { classifyChat, UnsupportedChatFormError } from '../src/common/chatClassification.js';
 const event = (id:string,ts:string,thread?:string) => ({team_id:'T',event_id:id,event:{type:'app_mention',user:'U',channel:'C',text:'<@BOT> question',ts,...(thread?{thread_ts:thread}:{})}});
+/** A one-to-one direct message needs no mention; only its allowlisted counterpart identifies it. */
+const directMessage = (id:string,ts:string,user='U',channel='D',channelType='im',thread?:string) =>
+ ({team_id:'T',event_id:id,event:{type:'message',channel_type:channelType,user,channel,text:'question',ts,...(thread?{thread_ts:thread}:{})}});
 test('Slack service shutdown cancels active text-engine generation without delivering', { timeout: 2000 }, async () => {
  const f=setup(); let began!:()=>void;
  const started=new Promise<void>(resolve=>{began=resolve});
@@ -26,14 +30,17 @@ test('Slack service shutdown cancels active text-engine generation without deliv
 });
 function setup(maxSessions=1000){
  const dir=mkdtempSync(join(tmpdir(),'slack-adapter-'));const journal=new MemoryTurnJournal();const service=new ConversationService(journal);const prompts:string[]=[],posts:Record<string,string>[]=[];let identity="provider-a/session-1";let reads=0,authorized=true,extra=false,resets=0;let history:Record<string,unknown>[]=[{ts:'1700000001.000000',user:'U',text:'<@BOT> question',thread_ts:'1700000001.000000'},{ts:'1700000002.000000',user:'FRIEND',text:'unmentioned clarification',thread_ts:'1700000001.000000'}];
- let historyUnavailable = false, audienceFailureAt = 0, audienceCalls = 0;
- let historyStarted: (() => void) | undefined;
+ let historyUnavailable = false, audienceFailureAt = 0, audienceCalls = 0, channelFlags: Record<string,unknown> = {};
+  const sessions:string[]=[],contexts:Array<SendMessageOptions['transportContext']>=[];
+  let historyStarted: (() => void) | undefined;
  let audienceStarted: (() => void) | undefined;
  const api: SlackApi={call:async(method:string,args?:Record<string,string>,signal?:AbortSignal)=>{
   if(method==='conversations.members' && audienceStarted) await new Promise<void>((_resolve,reject)=>{assert.ok(signal);signal.addEventListener('abort',()=>reject(signal.reason),{once:true});audienceStarted!();});
   if(method==='conversations.members' && ++audienceCalls === audienceFailureAt) throw new Error('Slack temporarily unavailable');
-  if(method==='conversations.info')return {ok:true,channel:{is_member:true}};
-  if(method==='conversations.members')return {ok:true,members:authorized?['U','FRIEND','BOT',...(extra?['NEW']:[])]:['FRIEND','BOT']};
+  if(method==='conversations.info')return {ok:true,channel:{is_member:true,...channelFlags}};
+  if(method==='conversations.members')return {ok:true,members:authorized
+    ? (channelFlags.is_im ? ['U','BOT'] : ['U','FRIEND','BOT',...(extra?['NEW']:[])])
+    : ['FRIEND','BOT']};
   if(method==='chat.postMessage'){posts.push(args!);return {ok:true,ts:'1900000009.000001'}};
   if(method==='conversations.replies'||method==='conversations.history'){
    reads++;
@@ -42,10 +49,10 @@ function setup(maxSessions=1000){
   }
   throw Error(method);
  }};
- const engine={contextIdentity:()=>identity,sendMessage:async(_key:string,prompt:string,_files?:SendAttachment[],_options?:SendMessageOptions)=>{prompts.push(prompt);return {content:'answer',attachments:[]}},resetSession:async()=>{resets++},shutdown:async()=>{}};
+ const engine={contextIdentity:()=>identity,sendMessage:async(key:string,prompt:string,_files?:SendAttachment[],options?:SendMessageOptions)=>{sessions.push(key);contexts.push(options?.transportContext);prompts.push(prompt);return {content:'answer',attachments:[]}},resetSession:async()=>{resets++},shutdown:async()=>{}};
  const excludedAuthors=new Set<string>();
- const adapter=new SlackAdapter({teamId:'T',installationId:'i',botUserId:'BOT',channels:new Set(['C']),users:new Set(['U']),excludedAuthors,stateDirectory:dir},api,api,engine,service,maxSessions);
- return {dir,api,adapter,engine,service,prompts,posts,journal,blockAudience:(started:()=>void)=>{audienceStarted=started},blockHistory:(started:()=>void)=>{historyStarted=started},failAudienceCheck:(offset:number)=>{audienceFailureAt=audienceCalls+offset},loseHistoryAccess:()=>{historyUnavailable=true},exclude:(id:string)=>excludedAuthors.add(id),changeIdentity:(value:string)=>{identity=value},setHistory:(messages:Record<string,unknown>[])=>{history=messages},resets:()=>resets,changeAudience:()=>{extra=true},reads:()=>reads,revoke:()=>{authorized=false},close:async()=>{await service.shutdown();rmSync(dir,{recursive:true,force:true})}};
+ const adapter=new SlackAdapter({teamId:'T',installationId:'i',botUserId:'BOT',channels:new Set(['C','D']),users:new Set(['U']),excludedAuthors,stateDirectory:dir},api,api,engine,service,maxSessions);
+ return {dir,api,adapter,engine,service,prompts,posts,journal,sessions,contexts,blockAudience:(started:()=>void)=>{audienceStarted=started},blockHistory:(started:()=>void)=>{historyStarted=started},failAudienceCheck:(offset:number)=>{audienceFailureAt=audienceCalls+offset},loseHistoryAccess:()=>{historyUnavailable=true},exclude:(id:string)=>excludedAuthors.add(id),changeIdentity:(value:string)=>{identity=value},setHistory:(messages:Record<string,unknown>[])=>{history=messages},resets:()=>resets,changeAudience:()=>{extra=true},reads:()=>reads,revoke:()=>{authorized=false},describeChannel:(flags:Record<string,unknown>)=>{channelFlags=flags},close:async()=>{await service.shutdown();rmSync(dir,{recursive:true,force:true})}};
 }
 
 test('Slack shutdown aborts audience membership retrieval before generation', { timeout: 2000 }, async () => {
@@ -456,4 +463,118 @@ test('Slack delivery-time authorization failure starts no attachment upload', as
   const result=await (await f.adapter.receive(event('delivery-revoked','1700000003.000000','1700000001.000000')))!.completion;
   assert.equal(result.state,'failed');assert.equal(uploads,0);
  } finally { await f.close(); }
+});
+
+for(const form of ['channel','thread'] as const) test('Slack classifies '+form+' conversations before delivering context to the agent',async()=>{
+ const f=setup();try{
+  const thread=form==='thread'?'1700000001.000000':undefined;
+  const result=await (await f.adapter.receive(event('classified-'+form,'1700000003.000000',thread)))!.completion;
+  assert.equal(result.state,'delivered');
+  assert.deepEqual(f.contexts,[{platform:'slack',history:true,attachments:true,classification:{platform:'slack',form,choice:'direct_reply'}}]);
+  assert.equal(f.prompts.length,1);
+ }finally{await f.close()}
+});
+
+test('Slack admits an allowlisted one-to-one direct message and answers it in that direct message',async()=>{
+  const f=setup();try{
+   f.describeChannel({is_im:true});
+   f.setHistory([{ts:'1700000001.000000',user:'U',text:'earlier question'},{ts:'1700000002.000000',user:'U',text:'unmentioned follow-up'}]);
+   const result=await (await f.adapter.receive(directMessage('dm-admitted','1700000003.000000')))!.completion;
+   assert.equal(result.state,'delivered');
+   assert.match(result.sessionKey,/"individual","U"\]$/);
+   assert.equal(result.input.conversation.kind,'direct');
+   assert.equal(result.input.conversation.channelId,'D');
+   assert.equal(result.input.text,'question');
+   assert.deepEqual(f.contexts,[{platform:'slack',history:true,attachments:true,classification:{platform:'slack',form:'direct',choice:'direct_reply'}}]);
+   assert.equal(f.prompts.length,1);
+   assert.ok(f.prompts[0].includes('earlier question'));
+   assert.deepEqual(f.posts.map(p=>[p.channel,p.thread_ts]),[['D',undefined]]);
+  }finally{await f.close()}
+});
+
+test('Slack direct-message history resolves to the direct conversation and never to a thread',async()=>{
+  const f=setup();try{
+   f.describeChannel({is_im:true});
+   f.setHistory([{ts:'1700000001.000000',user:'U',text:'earlier question'},{ts:'1700000002.000000',user:'U',text:'unmentioned clarification'}]);
+   let options:SendMessageOptions|undefined;
+   const methods:string[]=[];const original=f.api.call;
+   f.api.call=async(method,args,signal)=>{methods.push(method);return original(method,args,signal)};
+   f.engine.sendMessage=async(_key,_prompt,_files,opts)=>{options=opts;return {content:'answer',attachments:[]}};
+   await (await f.adapter.receive(directMessage('dm-scope','1700000003.000000')))!.completion;
+   assert.ok(options?.resolveChannelHistory);
+   await assert.rejects(()=>options!.resolveChannelHistory!({scope:'thread',range:'recent',count:5}),/Unsupported history scope/);
+   await assert.rejects(()=>options!.resolveChannelHistory!({scope:'nonsense',range:'recent',count:5}),/Unsupported history scope/);
+   const summary=await options!.resolveChannelHistory!({scope:'channel',range:'recent',count:5});
+   assert.match(summary,/unmentioned clarification/);
+   assert.ok(methods.includes('conversations.history'));
+   assert.ok(!methods.includes('conversations.replies'));
+  }finally{await f.close()}
+});
+
+test('Slack keeps an admitted direct message session-isolated from channels and threads',async()=>{
+  const f=setup();try{
+   f.describeChannel({is_im:true});
+   await (await f.adapter.receive(directMessage('iso-direct','1700000005.000000')))!.completion;
+   f.describeChannel({});
+   await (await f.adapter.receive(event('iso-channel','1700000003.000000')))!.completion;
+   await (await f.adapter.receive(event('iso-thread','1700000004.000000','1700000001.000000')))!.completion;
+   f.describeChannel({is_im:true});
+   await (await f.adapter.receive(directMessage('iso-direct-2','1700000006.000000')))!.completion;
+   assert.equal(new Set(f.sessions).size,3);
+   assert.deepEqual(f.contexts.map(c=>c?.classification?.form),['direct','channel','thread','direct']);
+   assert.equal(f.sessions[0],f.sessions[3]);
+   assert.match(f.sessions[0],/"individual","U"\]$/);
+   assert.match(f.sessions[1],/"shared",null\]$/);
+   assert.match(f.sessions[2],/"shared",null\]$/);
+   assert.notEqual(f.sessions[0],f.sessions[1]);
+   assert.notEqual(f.sessions[0],f.sessions[2]);
+  }finally{await f.close()}
+});
+
+test('Slack rejects group DMs, non-allowlisted counterparts and mentions posted to a direct message',async()=>{
+  const f=setup();try{
+   assert.equal(f.adapter.normalize(directMessage('dm-mpim','1700000003.000000','U','G','mpim')),undefined);
+   assert.equal(f.adapter.normalize(directMessage('dm-stranger','1700000003.000000','STRANGER')),undefined);
+   assert.equal(f.adapter.normalize(directMessage('dm-channel','1700000003.000000','U','C')),undefined);
+   assert.equal(f.adapter.normalize(directMessage('dm-self','1700000003.000000','BOT')),undefined);
+   f.describeChannel({is_mpim:true});
+   const grouped=await f.adapter.receive(directMessage('dm-group','1700000003.000000'));
+   assert.equal((await grouped!.completion).state,'failed');
+   assert.equal(f.prompts.length,0);assert.equal(f.contexts.length,0);assert.equal(f.posts.length,0);
+  }finally{await f.close()}
+});
+
+test('Slack classification keeps channel and thread contexts in separate sessions',async()=>{
+ const f=setup();try{
+  await (await f.adapter.receive(event('iso-channel','1700000003.000000')))!.completion;
+  await (await f.adapter.receive(event('iso-thread','1700000004.000000','1700000001.000000')))!.completion;
+  assert.equal(f.sessions.length,2);assert.notEqual(f.sessions[0],f.sessions[1]);
+  assert.deepEqual(f.contexts.map(c=>c?.classification?.form),['channel','thread']);
+  assert.deepEqual(f.posts.map(p=>p.thread_ts),[undefined,'1700000001.000000']);
+ }finally{await f.close()}
+});
+
+test('Slack rejects ambiguous conversation forms before the provider runs',async()=>{
+ const f=setup();try{
+  assert.throws(()=>classifyChat({platform:'slack',kind:'thread'}),UnsupportedChatFormError);
+  assert.throws(()=>classifyChat({platform:'slack',kind:'huddle'}),UnsupportedChatFormError);
+ }finally{await f.close()}
+});
+
+test('Slack skips replayed output whose conversation no longer has a classifiable form',async()=>{
+ const f=setup();let output:TurnOutput|undefined;
+ try{
+  const generate=f.engine.sendMessage;f.engine.sendMessage=async(...args)=>{const result=await generate(...args);output=result;return result};
+  const handle=await f.adapter.receive(event('ambiguous-replay','1700000003.000000','1700000001.000000'));
+  const delivered=await handle!.completion;
+  assert.equal(delivered.state,'delivered');assert.ok(output?.audienceTag);
+  const ambiguous={...delivered,state:'generated' as const,output,receipt:undefined,
+   input:{...delivered.input,conversation:{...delivered.input.conversation,threadId:undefined}}};
+  f.journal.put(ambiguous);
+  const logged:string[]=[];const original=console.error;console.error=(...args:unknown[])=>{logged.push(args.map(String).join(' '))};
+  try{await f.adapter.recover();}finally{console.error=original;}
+  assert.match(logged.join('\n'),/Unsupported conversation form: Thread chat form requires its thread identity/);
+  assert.equal(f.journal.get(ambiguous.id)?.state,'generated');
+  assert.equal(f.posts.length,1);assert.equal(f.prompts.length,1);
+ }finally{await f.close()}
 });
