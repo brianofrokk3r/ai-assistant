@@ -13,6 +13,7 @@ import {
   reportProviderSecurityConfiguration,
   resolveConfiguredWorkspace,
   SENSITIVE_DIRECTORY_DENY_GLOBS,
+  SENSITIVE_DIRECTORY_NAME_LIST,
   SENSITIVE_PATH_DENY_GLOBS,
   secureSystemPrompt,
   setupSecurityMode,
@@ -317,7 +318,7 @@ test("Codex shared sessions receive distinct private temporary directories", () 
   }
 });
 
-test("Codex workspace preparation preserves existing state and rejects file or symlink collisions", t => {
+test("Codex workspace preparation preserves directories and regular files while rejecting symlinks", t => {
   const root = mkdtempSync(join(tmpdir(), "codex-workspace-preparation-"));
   const previousMode = process.env.AI_ASSISTANT_SECURITY_MODE;
   const previousRoot = process.env.AI_ASSISTANT_WORKSPACE_ROOT;
@@ -330,24 +331,27 @@ test("Codex workspace preparation preserves existing state and rejects file or s
     else process.env.AI_ASSISTANT_WORKSPACE_ROOT = previousRoot;
     rmSync(root, { recursive: true, force: true });
   });
-  const directory = join(root, ".codex");
-  prepareCodexWorkingDirectory(root);
-  writeFileSync(join(directory, "existing.txt"), "preserve");
-  prepareCodexWorkingDirectory(root);
-  assert.equal(readFileSync(join(directory, "existing.txt"), "utf8"), "preserve");
-  rmSync(directory, { recursive: true });
-  writeFileSync(directory, "preserve file");
-  assert.throws(() => prepareCodexWorkingDirectory(root), /EEXIST/);
-  assert.equal(readFileSync(directory, "utf8"), "preserve file");
-  rmSync(directory);
   const target = join(root, "target");
   mkdirSync(target);
-  symlinkSync(target, directory, "junction");
-  assert.throws(() => prepareCodexWorkingDirectory(root), /EEXIST/);
-  rmSync(directory);
+  for (const name of SENSITIVE_DIRECTORY_NAME_LIST) {
+    const directory = join(root, name);
+    prepareCodexWorkingDirectory(root);
+    writeFileSync(join(directory, "existing.txt"), "preserve");
+    prepareCodexWorkingDirectory(root);
+    assert.equal(readFileSync(join(directory, "existing.txt"), "utf8"), "preserve");
+    rmSync(directory, { recursive: true });
+    writeFileSync(directory, "preserve file");
+    prepareCodexWorkingDirectory(root);
+    assert.equal(readFileSync(directory, "utf8"), "preserve file");
+    rmSync(directory);
+    symlinkSync(target, directory, "junction");
+    assert.throws(() => prepareCodexWorkingDirectory(root), /EEXIST/);
+    rmSync(directory);
+  }
+  for (const name of SENSITIVE_DIRECTORY_NAME_LIST) rmSync(join(root, name), { recursive: true, force: true });
   process.env.AI_ASSISTANT_SECURITY_MODE = "unrestricted";
   prepareCodexWorkingDirectory(root);
-  assert.equal(existsSync(directory), false);
+  for (const name of SENSITIVE_DIRECTORY_NAME_LIST) assert.equal(existsSync(join(root, name)), false);
 });
 
 test("Codex can explicitly enable Sites without enabling other connected apps", () => {

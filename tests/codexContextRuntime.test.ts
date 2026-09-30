@@ -9,6 +9,7 @@ import { CodexProvider } from "../src/providers/codex.js";
 import { SessionStore } from "../src/common/sessionStore.js";
 
 interface ModelRequest {
+  model: string;
   input: { role?: string; content?: { text?: string }[] }[];
   tools?: { type: string; name?: string }[];
   text?: { format?: { type?: string } };
@@ -24,7 +25,7 @@ test("real Codex runtime refreshes instructions through a restricted handoff and
   t.after(() => { for (const key of keys) { if (old[key] === undefined) delete process.env[key]; else process.env[key] = old[key]; } });
   process.env.AI_ASSISTANT_SECURITY_MODE = "unrestricted";
   process.env.USER_INSTRUCTION_MODE = "off";
-  process.env.CODEX_MODEL = "gpt-5.4";
+  process.env.CODEX_MODEL = "gpt-6-astra";
   delete process.env.AI_ASSISTANT_SYSTEM_PROMPT_FILE;
   process.env.AI_ASSISTANT_SYSTEM_PROMPT = "POLICY_ALPHA";
   const requests: ModelRequest[] = [];
@@ -82,8 +83,10 @@ test("real Codex runtime refreshes instructions through a restricted handoff and
   const firstId = store.get("conversation");
   const developerText = (request: ModelRequest) => request.input.filter(item => item.role === "developer").flatMap(item => item.content?.map(part => part.text) ?? []).join("\n");
   assert.match(developerText(requests[0]), /POLICY_ALPHA/);
+  assert.equal(requests[0].model, "gpt-6-astra");
 
   process.env.AI_ASSISTANT_SYSTEM_PROMPT = "POLICY_BETA";
+  process.env.CODEX_MODEL = "gpt-6.1-sol";
   invalidHandoff = true;
   await assert.rejects(provider.sendMessage("conversation", "Finish the report.", undefined, { timeoutMs: 20_000 }));
   assert.equal(store.get("conversation"), firstId);
@@ -91,6 +94,7 @@ test("real Codex runtime refreshes instructions through a restricted handoff and
   await provider.sendMessage("conversation", "Finish the report.", undefined, { timeoutMs: 20_000 });
   assert.notEqual(store.get("conversation"), firstId);
   const refreshed = requests.at(-1)!;
+  assert.equal(refreshed.model, "gpt-6.1-sol");
   assert.match(developerText(refreshed), /POLICY_BETA/);
   assert.doesNotMatch(developerText(refreshed), /POLICY_ALPHA/);
   assert.match(JSON.stringify(refreshed.input), /PROJECT_ORCHID/);
@@ -99,7 +103,10 @@ test("real Codex runtime refreshes instructions through a restricted handoff and
   assert.equal(summaryRequests.length, 2);
   // Codex exposes apply_patch based on model metadata, even with execution features disabled.
   // Its read-only permission policy must reject it; no other tools may be advertised.
-  for (const request of summaryRequests) assert.ok((request.tools ?? []).every(tool => tool.name === "apply_patch"));
+  for (const request of summaryRequests) {
+    assert.equal(request.model, "gpt-6.1-sol");
+    assert.ok((request.tools ?? []).every(tool => tool.name === "apply_patch"));
+  }
 
   const refreshedId = store.get("conversation");
   await provider.shutdown();

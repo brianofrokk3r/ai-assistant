@@ -198,7 +198,7 @@ const SENSITIVE_FILE_NAME_LIST = [
     ".pypirc",
     "auth.json",
 ];
-const SENSITIVE_DIRECTORY_NAME_LIST = [
+export const SENSITIVE_DIRECTORY_NAME_LIST = [
     ".aws",
     ".codex",
     ".config",

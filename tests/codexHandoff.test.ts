@@ -11,6 +11,21 @@ test("handoffs accept the production overage and enforce the hard boundary", () 
   assert.throws(() => parseHandoff(JSON.stringify({ summary: "x".repeat(16_001) })), /exceeds 16000/);
 });
 
+test("completed handoffs tolerate non-fatal diagnostics while retaining validation and tool guards", async () => {
+  const diagnostic: ThreadItem = { id: "notice", type: "error", message: "Non-fatal runtime diagnostic" };
+  const signal = new AbortController().signal;
+  const summarize = (finalResponse: string, items: ThreadItem[] = [diagnostic]) => summarizeHandoff({
+    run: async () => ({ finalResponse, items, usage: null }),
+  }, signal);
+  const valid = JSON.stringify({ summary: "Keep PROJECT_ORCHID." });
+  assert.equal(await summarize(valid), "Keep PROJECT_ORCHID.");
+  await assert.rejects(summarize("invalid JSON"), SyntaxError);
+  await assert.rejects(summarize(valid, [diagnostic, {
+    id: "tool", type: "command_execution", command: "echo unsafe", aggregated_output: "", status: "completed", exit_code: 0,
+  }]), /tool operation/);
+  await assert.rejects(summarizeHandoff({ run: async () => { throw new Error("Codex turn failed"); } }, signal), /Codex turn failed/);
+});
+
 test("oversized handoffs shorten once on the same thread with the same schema and abort signal", async () => {
   const signal = new AbortController().signal;
   const prompts: string[] = [];

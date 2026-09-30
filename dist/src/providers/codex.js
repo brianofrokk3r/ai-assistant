@@ -16,7 +16,7 @@ import { GitHubContributionSessions, githubContributionPrompt } from "../common/
 import { codexHostMcpOverride, codexHostMcpOverrides } from "../common/hostMcpConfig.js";
 import { UserVisibleError } from "../common/userVisibleError.js";
 import { configuredMilliseconds, providerTimeout, startProgressUpdates } from "../common/runLifecycle.js";
-import { CODEX_WEB_SEARCH_MODES, configuredSecurityMode, configuredSitesEnabled, configuredCodexWebSearchMode, ensureProviderWorkingDirectory, providerChildEnvironment, resolveConfiguredWorkspace, SENSITIVE_DIRECTORY_DENY_GLOBS, SENSITIVE_FILE_DENY_GLOBS, SENSITIVE_PATH_ALLOW_GLOBS, secureSystemPrompt, } from "../common/providerSecurity.js";
+import { CODEX_WEB_SEARCH_MODES, configuredSecurityMode, configuredSitesEnabled, configuredCodexWebSearchMode, ensureProviderWorkingDirectory, providerChildEnvironment, resolveConfiguredWorkspace, SENSITIVE_DIRECTORY_DENY_GLOBS, SENSITIVE_DIRECTORY_NAME_LIST, SENSITIVE_FILE_DENY_GLOBS, SENSITIVE_PATH_ALLOW_GLOBS, secureSystemPrompt, } from "../common/providerSecurity.js";
 import { DEFAULT_REASONING_EFFORT, REASONING_EFFORTS, UnsupportedError, RunTimeoutError, } from "./types.js";
 import { readFile, stat } from "node:fs/promises";
 const require = createRequire(import.meta.url);
@@ -52,18 +52,24 @@ export function createCodexSessionTemporaryDirectory() {
 export function prepareCodexWorkingDirectory(directory) {
     if (configuredSecurityMode() !== "shared")
         return;
-    const codexDirectory = path.join(resolveConfiguredWorkspace(directory), ".codex");
-    // Codex 0.153.4 protects .codex even when absent. Our explicit deny rule
-    // otherwise masks that missing path as a file, colliding with its directory
-    // mount in Bubblewrap. Establish the type before resolving sandbox rules;
-    // access stays denied and no provider credentials are copied.
-    try {
-        fs.mkdirSync(codexDirectory, { mode: 0o700 });
-    }
-    catch (error) {
-        if (error.code !== "EEXIST"
-            || !fs.lstatSync(codexDirectory).isDirectory())
-            throw error;
+    const workspace = resolveConfiguredWorkspace(directory);
+    // Codex 0.159.2 protects credential directories even when absent. Explicit
+    // denials can otherwise mask missing paths as files, colliding with directory
+    // mounts in Bubblewrap. Establish missing paths as directories while preserving
+    // existing regular files (including legacy denial placeholders). The policy
+    // denies both types; symlinks and special files remain rejected.
+    for (const name of SENSITIVE_DIRECTORY_NAME_LIST) {
+        const sensitiveDirectory = path.join(workspace, name);
+        try {
+            fs.mkdirSync(sensitiveDirectory, { mode: 0o700 });
+        }
+        catch (error) {
+            if (error.code !== "EEXIST")
+                throw error;
+            const existing = fs.lstatSync(sensitiveDirectory);
+            if (!existing.isDirectory() && !existing.isFile())
+                throw error;
+        }
     }
 }
 export function codexFilesystemPermissionOverride(sitesEnabled = false) {
