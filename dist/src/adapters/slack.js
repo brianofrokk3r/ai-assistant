@@ -250,7 +250,7 @@ export class SlackAdapter {
             signal?.throwIfAborted();
             const conversation = input.conversation;
             if (conversation.platform !== 'slack' || conversation.tenantId !== this.config.teamId
-                || conversation.installationId !== this.config.installationId || conversation.kind !== 'thread'
+                || conversation.installationId !== this.config.installationId || !['channel', 'thread'].includes(conversation.kind)
                 || !this.config.channels.has(conversation.channelId) || !this.config.users.has(input.actor.userId))
                 continue;
             const handle = await this.submit(input);
