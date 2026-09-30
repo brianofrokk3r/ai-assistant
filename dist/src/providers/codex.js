@@ -16,7 +16,7 @@ import { GitHubContributionSessions, githubContributionPrompt } from "../common/
 import { codexHostMcpOverride, codexHostMcpOverrides } from "../common/hostMcpConfig.js";
 import { UserVisibleError } from "../common/userVisibleError.js";
 import { configuredMilliseconds, providerTimeout, startProgressUpdates } from "../common/runLifecycle.js";
-import { configuredSecurityMode, configuredSitesEnabled, ensureProviderWorkingDirectory, providerChildEnvironment, resolveConfiguredWorkspace, SENSITIVE_DIRECTORY_DENY_GLOBS, SENSITIVE_DIRECTORY_NAME_LIST, SENSITIVE_FILE_DENY_GLOBS, SENSITIVE_PATH_ALLOW_GLOBS, secureSystemPrompt, } from "../common/providerSecurity.js";
+import { CODEX_WEB_SEARCH_MODES, configuredSecurityMode, configuredSitesEnabled, configuredCodexWebSearchMode, ensureProviderWorkingDirectory, providerChildEnvironment, resolveConfiguredWorkspace, SENSITIVE_DIRECTORY_DENY_GLOBS, SENSITIVE_DIRECTORY_NAME_LIST, SENSITIVE_FILE_DENY_GLOBS, SENSITIVE_PATH_ALLOW_GLOBS, secureSystemPrompt, } from "../common/providerSecurity.js";
 import { DEFAULT_REASONING_EFFORT, REASONING_EFFORTS, UnsupportedError, RunTimeoutError, } from "./types.js";
 import { readFile, stat } from "node:fs/promises";
 const require = createRequire(import.meta.url);
@@ -27,6 +27,7 @@ const MAX_CODEX_INLINE_ATTACHMENT_BYTES = 1_000_000;
 export const CODEX_SITES_CONNECTOR_ID = "connector_20205bf7d4e99a89d7154bb849718324";
 export const CODEX_SITES_GIT_HOST = "git.chatgpt-team.site";
 export const CODEX_PACKAGE_HOST = "registry.npmjs.org";
+export { CODEX_WEB_SEARCH_MODES, configuredCodexWebSearchMode };
 export const CODEX_GITHUB_READ_ONLY_TOOLS = [
     "get_repo",
     "fetch",
@@ -363,10 +364,14 @@ export class CodexProvider {
     messageQueues = new Map();
     sessionContexts = new Map();
     handoffs = new Map();
+    webSearchMode;
     constructor(makeClient = options => new Codex(options), store = new SessionStore("codex"), githubTools = new GitHubContributionSessions()) {
         this.makeClient = makeClient;
         this.store = store;
         this.githubTools = githubTools;
+        // Resolve once so every normal thread in this provider instance has the
+        // same startup-validated policy, even if process.env is later mutated.
+        this.webSearchMode = configuredCodexWebSearchMode();
     }
     histories = new Map();
     workingDirOverrides = new Map();
@@ -398,6 +403,9 @@ export class CodexProvider {
             workingDirectory,
             skipGitRepoCheck: true,
             approvalPolicy: "never",
+            // Codex supports indexed mode; the SDK runtime forwards this value even
+            // though version 0.157.1's declaration still lists only three modes.
+            webSearchMode: this.webSearchMode,
             ...codexThreadSecurityOptions(),
         };
         return options;
@@ -662,6 +670,12 @@ export class CodexProvider {
         }
         return {
             status: { version },
+            providerSecurity: {
+                hostedWebSearch: this.webSearchMode,
+                sandboxedCommandNetwork: configuredSecurityMode() === "shared"
+                    ? `restricted (${configuredSitesEnabled() ? "package registry and ChatGPT Sites source pushes" : "package registry only"})`
+                    : "enabled by unrestricted sandbox mode",
+            },
             authStatus: {
                 isAuthenticated: Boolean(process.env.OPENAI_API_KEY),
                 login: process.env.OPENAI_API_KEY ? "OPENAI_API_KEY" : undefined,

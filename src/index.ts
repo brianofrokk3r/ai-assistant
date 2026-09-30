@@ -1,5 +1,7 @@
 import { config } from "dotenv";
 config();
+import { reportProviderSecurityConfiguration } from "./common/providerSecurity.js";
+reportProviderSecurityConfiguration();
 const adapter = process.env.AI_ASSISTANT_ADAPTER?.trim() || 'discord';
 if (adapter === 'discord') await import('./composition/discord.js');
 else if (adapter === 'slack') {

@@ -43,6 +43,11 @@ export interface AuthStatus {
 export interface StatusInfo {
   status: { version?: string };
   authStatus: AuthStatus;
+  /** Provider capability diagnostics kept distinct from authentication state. */
+  providerSecurity?: {
+    hostedWebSearch?: string;
+    sandboxedCommandNetwork?: string;
+  };
 }
 
 export type HistoryEvent =

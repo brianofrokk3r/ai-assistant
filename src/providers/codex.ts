@@ -18,8 +18,10 @@ import { codexHostMcpOverride, codexHostMcpOverrides } from "../common/hostMcpCo
 import { UserVisibleError } from "../common/userVisibleError.js";
 import { configuredMilliseconds, providerTimeout, startProgressUpdates } from "../common/runLifecycle.js";
 import {
+  CODEX_WEB_SEARCH_MODES,
   configuredSecurityMode,
   configuredSitesEnabled,
+  configuredCodexWebSearchMode,
   ensureProviderWorkingDirectory,
   providerChildEnvironment,
   resolveConfiguredWorkspace,
@@ -28,6 +30,7 @@ import {
   SENSITIVE_FILE_DENY_GLOBS,
   SENSITIVE_PATH_ALLOW_GLOBS,
   secureSystemPrompt,
+  type CodexWebSearchMode,
 } from "../common/providerSecurity.js";
 import {
   DEFAULT_REASONING_EFFORT,
@@ -59,6 +62,8 @@ const MAX_CODEX_INLINE_ATTACHMENT_BYTES = 1_000_000;
 export const CODEX_SITES_CONNECTOR_ID = "connector_20205bf7d4e99a89d7154bb849718324";
 export const CODEX_SITES_GIT_HOST = "git.chatgpt-team.site";
 export const CODEX_PACKAGE_HOST = "registry.npmjs.org";
+export { CODEX_WEB_SEARCH_MODES, configuredCodexWebSearchMode };
+export type { CodexWebSearchMode };
 export const CODEX_GITHUB_READ_ONLY_TOOLS = [
   "get_repo",
   "fetch",
@@ -444,12 +449,17 @@ export class CodexProvider implements Provider {
   private messageQueues: Map<string, Promise<unknown>> = new Map();
   private sessionContexts = new Map<string, SessionContext>();
   private handoffs = new Map<string, string>();
+  private readonly webSearchMode: CodexWebSearchMode;
 
   constructor(
     private readonly makeClient: (options: CodexOptions) => Pick<Codex, "startThread" | "resumeThread"> = options => new Codex(options),
     private readonly store = new SessionStore("codex"),
     private readonly githubTools = new GitHubContributionSessions(),
-  ) {}
+  ) {
+    // Resolve once so every normal thread in this provider instance has the
+    // same startup-validated policy, even if process.env is later mutated.
+    this.webSearchMode = configuredCodexWebSearchMode();
+  }
   private histories: Map<string, HistoryEvent[]> = new Map();
   private workingDirOverrides: Map<string, string> = new Map();
   private modelOverrides: Map<string, string> = new Map();
@@ -482,6 +492,9 @@ export class CodexProvider implements Provider {
       workingDirectory,
       skipGitRepoCheck: true,
       approvalPolicy: "never",
+      // Codex supports indexed mode; the SDK runtime forwards this value even
+      // though version 0.157.1's declaration still lists only three modes.
+      webSearchMode: this.webSearchMode as unknown as ThreadOptions["webSearchMode"],
       ...codexThreadSecurityOptions(),
     };
     return options;
@@ -759,6 +772,12 @@ export class CodexProvider implements Provider {
 
     return {
       status: { version },
+      providerSecurity: {
+        hostedWebSearch: this.webSearchMode,
+        sandboxedCommandNetwork: configuredSecurityMode() === "shared"
+          ? `restricted (${configuredSitesEnabled() ? "package registry and ChatGPT Sites source pushes" : "package registry only"})`
+          : "enabled by unrestricted sandbox mode",
+      },
       authStatus: {
         isAuthenticated: Boolean(process.env.OPENAI_API_KEY),
         login: process.env.OPENAI_API_KEY ? "OPENAI_API_KEY" : undefined,
