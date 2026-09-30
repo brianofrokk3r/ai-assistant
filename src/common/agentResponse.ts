@@ -507,8 +507,8 @@ function removeEmptyArtifactRun(run: ArtifactRun): void {
   }
 }
 
-export function withArtifactOutputPrompt(prompt: string, run: ArtifactRun, transport?: { platform: string }): string {
-  if (transport) return prompt + '\n\nHost tool run_id: ' + path.basename(run.directory) + '. This is a text-only response; file delivery is unavailable.';
+export function withArtifactOutputPrompt(prompt: string, run: ArtifactRun, transport?: { platform: string; attachments?: boolean }): string {
+  if (transport && !transport.attachments) return prompt + '\n\nHost tool run_id: ' + path.basename(run.directory) + '. This is a text-only response; file delivery is unavailable.';
   const portablePath = run.relativeDirectory.split(path.sep).join("/");
   return `${prompt}\n\n<artifact-output>Current run_id: ${path.basename(run.directory)}. Save outputs under ${portablePath}/. Call attach_file with the finished file path to register it for delivery. fetch_artifact accepts direct file URLs and Discord message URLs; transcode_video processes local video files using software encoding. Never infer that a provider-displayed image has been delivered to Discord.</artifact-output>`;
 }
@@ -849,4 +849,3 @@ async function prepareProviderResponse(
   // Authoritative provider outputs precede model markers; discovery is fallback only.
   return prepareAgentResponse([...markers, content, ...warnings].filter(Boolean).join("\n\n"), run, fallbackArtifacts);
 }
-

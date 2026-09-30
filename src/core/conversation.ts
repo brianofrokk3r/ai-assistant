@@ -42,7 +42,7 @@ export interface TrustedAdapterContext<P extends PreparedTurn = PreparedTurn> {
   authorize(input: IncomingTurn, stage: "ingress" | "execution" | "delivery", output?: TurnOutput, signal?: AbortSignal): Promise<boolean>;
   prepare(input: IncomingTurn, key: string, signal: AbortSignal): Promise<P>;
   generate(prepared: P, key: string, signal: AbortSignal, progress: (p: ProgressUpdate) => Promise<void>): Promise<TurnOutput>;
-  deliver(output: TurnOutput, deliveryKey: string, sessionKey: string): Promise<DeliveryReceipt>;
+  deliver(output: TurnOutput, deliveryKey: string, sessionKey: string, signal: AbortSignal): Promise<DeliveryReceipt>;
   onError?(error: unknown): void;
   progress?(update: ProgressUpdate): Promise<void>;
 }

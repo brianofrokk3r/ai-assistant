@@ -75,6 +75,75 @@ test('Slack startup replays generated output without a source retry and never re
   } finally { restored.close(); }
 });
 
+test('Slack startup delivers generated attachment output once without rerunning the provider', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'slack-generated-file-replay-'));
+  configure(t, directory);
+  const input: IncomingTurn = { eventId: 'generated-attachment-recovery', sourceMessageId: '1700000003.000000', text: 'question',
+    receivedAt: new Date(1700000003000).toISOString(), actor: { platform: 'slack', tenantId: 'T', userId: 'U' },
+    conversation: { platform: 'slack', tenantId: 'T', installationId: 'i', channelId: 'C', threadId: '1700000001.000000', kind: 'thread' } };
+  const journalPath = join(directory, 'slack-turns');
+  const journal = new FileTurnJournal(journalPath);
+  const output = { content: '', attachments: [{ displayName: 'résumé.txt', data: Buffer.from([0, 255, 3]) }],
+    audienceTag: createHash('sha256').update(JSON.stringify(['BOT', 'U'])).digest('hex') };
+  journal.put({ id: eventKey(input), input, sessionKey: sessionKey(input, 'shared'), updatedAt: '', state: 'generated', retryGeneratedDelivery: true, output });
+  journal.close();
+  let tickets = 0, uploads = 0, completions = 0;
+  const controller = new AbortController();
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, options?: RequestInit) => {
+    if (String(url) === 'https://files.slack.com/upload/v1/ticket') {
+      uploads++;
+      assert.equal(new Headers(options?.headers).get('content-type'), 'application/octet-stream');
+      assert.deepEqual(Buffer.from(await new Response(options?.body).arrayBuffer()), Buffer.from([0, 255, 3]));
+      return new Response(null, { status: 200 });
+    }
+    const method = String(url).split('/').at(-1);
+    if (method === 'auth.test') return Response.json({ ok: true, team_id: 'T', user_id: 'BOT' });
+    if (method === 'conversations.info') return Response.json({ ok: true, channel: { is_member: true } });
+    if (method === 'conversations.members') return Response.json({ ok: true, members: ['BOT', 'U'] });
+    if (method === 'files.getUploadURLExternal') { tickets++; return Response.json({ ok: true, file_id: 'F1', upload_url: 'https://files.slack.com/upload/v1/ticket' }); }
+    if (method === 'files.completeUploadExternal') {
+      completions++;
+      const args = new URLSearchParams(String(options?.body));
+      assert.equal(args.get('channel_id'), 'C'); assert.equal(args.get('thread_ts'), '1700000001.000000');
+      assert.deepEqual(JSON.parse(args.get('files')!), [{ id: 'F1', title: 'résumé.txt' }]);
+      return Response.json({ ok: true, files: [{ id: 'F1' }] });
+    }
+    if (method === 'apps.connections.open') { controller.abort(); throw controller.signal.reason; }
+    throw Error('Unexpected API call: ' + method);
+  });
+  await assert.rejects(startSlack(controller.signal), error => error === controller.signal.reason);
+  assert.deepEqual({ tickets, uploads, completions }, { tickets: 1, uploads: 1, completions: 1 });
+  assert.deepEqual(readdirSync(join(directory, 'slack-provider-state')), [], 'recovery must not generate another provider response');
+  const restored = new FileTurnJournal(journalPath);
+  try { assert.equal(restored.get(eventKey(input))?.state, 'delivered'); assert.equal(restored.get(eventKey(input))?.output, undefined); }
+  finally { restored.close(); }
+});
+
+test('Slack startup retains an interrupted attachment delivery without regenerating or uploading it', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'slack-file-replay-'));
+  configure(t, directory);
+  const input: IncomingTurn = { eventId: 'attachment-recovery', sourceMessageId: '1700000003.000000', text: 'question',
+    receivedAt: new Date(1700000003000).toISOString(), actor: { platform: 'slack', tenantId: 'T', userId: 'U' },
+    conversation: { platform: 'slack', tenantId: 'T', installationId: 'i', channelId: 'C', threadId: '1700000001.000000', kind: 'thread' } };
+  const journalPath = join(directory, 'slack-turns');
+  const journal = new FileTurnJournal(journalPath);
+  const record = { id: eventKey(input), input, sessionKey: sessionKey(input, 'shared'), updatedAt: '', state: 'delivering' as const,
+    output: { content: '', attachments: [{ displayName: 'report.txt', data: Buffer.from([0, 255]) }], audienceTag: createHash('sha256').update(JSON.stringify(['BOT', 'U'])).digest('hex') } };
+  journal.put(record); journal.close();
+  let uploads = 0; const controller = new AbortController();
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+    if (String(url).startsWith('https://files.slack.com/')) { uploads++; throw Error('must not upload'); }
+    const method = String(url).split('/').at(-1);
+    if (method === 'auth.test') return Response.json({ ok: true, team_id: 'T', user_id: 'BOT' });
+    if (method === 'apps.connections.open') { controller.abort(); throw controller.signal.reason; }
+    throw Error('Unexpected API call: ' + method);
+  });
+  await assert.rejects(startSlack(controller.signal), error => error === controller.signal.reason);
+  const restored = new FileTurnJournal(journalPath);
+  try { assert.equal(restored.get(record.id)?.state, 'interrupted'); assert.deepEqual(restored.get(record.id)?.output?.attachments[0].data, Buffer.from([0, 255])); assert.equal(uploads, 0); }
+  finally { restored.close(); }
+});
+
 for (const failure of ['journal', 'context']) test('Slack releases ownership after failed ' + failure + ' initialization', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'slack-startup-'));
   configure(t, directory);
@@ -147,8 +216,8 @@ for (const thread of [undefined, '1700000001.000000']) test('Socket Mode file ev
   if(method==='conversations.info')return Response.json({ok:true,channel:{is_member:true}});
   if(method==='conversations.members')return Response.json({ok:true,members:['BOT','U']});
   if(method==='conversations.history'||method==='conversations.replies')return Response.json({ok:true,messages:[]});
-  if(method==='chat.postMessage'){
-   assert.equal(downloaded,true);const args=new URLSearchParams(String(options?.body));assert.equal(args.get('thread_ts'),thread??'1700000003.000000');posted();return Response.json({ok:true,ts:'1700000004.000000'});
+   if(method==='chat.postMessage'){
+    assert.equal(downloaded,true);const args=new URLSearchParams(String(options?.body));assert.equal(args.get('thread_ts'),thread??null);posted();return Response.json({ok:true,ts:'1700000004.000000'});
   }
   throw Error('Unexpected API '+method);
  });

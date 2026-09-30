@@ -191,6 +191,8 @@ export class ConversationService {
                     controller.signal.throwIfAborted();
                     record.output = output;
                     record.state = 'generated';
+                    // Generated output is safe to replay until the durable state advances
+                    // to `delivering`; only then might a message or file already be visible.
                     record.retryGeneratedDelivery = Boolean(host.retryGeneratedDelivery);
                     this.save(record);
                 }
@@ -199,7 +201,7 @@ export class ConversationService {
                     throw new Error('Conversation access denied.');
                 controller.signal.throwIfAborted();
                 this.save({ ...record, state: 'delivering' });
-                const receipt = await host.deliver(record.output, id, executionKey);
+                const receipt = await host.deliver(record.output, id, executionKey, controller.signal);
                 return this.save({ ...record, state: 'delivered', output: undefined, error: undefined, receipt });
             }
             catch (error) {
