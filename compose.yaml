@@ -18,6 +18,7 @@ services:
       AI_ASSISTANT_BROWSER_URL: http://browser:3123
       GITHUB_CONTRIBUTIONS_PUBLISH_LIMIT: ${GITHUB_CONTRIBUTIONS_PUBLISH_LIMIT:-20}
       CODEX_REVIEW_LIMIT: ${CODEX_REVIEW_LIMIT:-20}
+      CODEX_WEB_SEARCH_MODE: ${CODEX_WEB_SEARCH_MODE:-cached}
     depends_on:
       browser:
         condition: service_healthy

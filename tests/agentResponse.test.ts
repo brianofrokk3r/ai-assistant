@@ -65,6 +65,25 @@ test("per-turn prompt names the isolated artifact directory", async () => {
   });
 });
 
+test("attachment-capable transports preserve file-only responses without changing Discord defaults", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "agent-artifact-only-"));
+  const slackPrompt = await captureAgentArtifacts(workspace, async (run) => {
+    const prompt = withArtifactOutputPrompt("hello", run, { platform: "slack", attachments: true });
+    assert.match(prompt, /delivered to slack/);
+    assert.doesNotMatch(prompt, /delivered to Discord/);
+    run.registeredAttachments = [{ displayName: "only.txt", data: Buffer.from("only") }];
+    return "";
+  }, true);
+  assert.equal(slackPrompt.content, "");
+  assert.equal(slackPrompt.attachments.length, 1);
+
+  const discordDefault = await captureAgentArtifacts(workspace, async (run) => {
+    run.registeredAttachments = [{ displayName: "only.txt", data: Buffer.from("only") }];
+    return "";
+  });
+  assert.equal(discordDefault.content, "(no response)");
+});
+
 test("single-raster SVG wrappers are uploaded with a Discord-previewable image name", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "agent-artifact-"));
   const png = Buffer.from(

@@ -57,7 +57,7 @@ export async function runCli(args = process.argv.slice(3), makeEngine = createTe
         platform: 'cli', tenantId: 'local', installationId: 'local', capabilities: TEXT_CAPABILITIES, audience: 'individual',
         authorize: async i => i.actor.userId === actor.userId,
         prepare: async i => ({ prompt: i.text }),
-        generate: (p, key, signal, onProgress) => engine!.sendMessage(key, p.prompt, undefined, { transportContext: { platform: 'cli', history: false }, signal, onProgress }),
+        generate: (p, key, signal, onProgress) => engine!.sendMessage(key, p.prompt, undefined, { transportContext: { platform: 'cli', history: false, attachments: false }, signal, onProgress }),
         progress: async p => { console.error(p.message); },
         deliver: async output => { print(opts.json ? { status: 'delivered', content: output.content, unsupportedAttachments: output.attachments.length } : output.content + (output.attachments.length ? '\n[File delivery unavailable in CLI.]' : '')); return { messageIds: [] }; },
       });

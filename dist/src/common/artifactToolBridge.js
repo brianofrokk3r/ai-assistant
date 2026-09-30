@@ -90,7 +90,11 @@ export class ArtifactToolSessions {
     }
     async config(key, transport) {
         const config = await this.connection(key).ready;
-        return transport ? { ...config, env: { ...config.env, AI_ARTIFACT_ALLOWED_TOOLS: JSON.stringify(['fetch_webpage', ...(transport.history ? ['fetch_channel_history'] : [])]) } } : config;
+        return transport ? { ...config, env: { ...config.env, AI_ARTIFACT_ALLOWED_TOOLS: JSON.stringify([
+                    'fetch_webpage',
+                    ...(transport.history ? ['fetch_channel_history'] : []),
+                    ...(transport.attachments ? ['attach_file'] : []),
+                ]) } } : config;
     }
     async run(key, run, files, options, action) {
         const runtime = new ArtifactTools(run, options);

@@ -83,9 +83,13 @@ export class ArtifactToolSessions {
     if (!connection) { connection = new ArtifactConnection(); this.connections.set(key, connection); }
     return connection;
   }
-  async config(key: string, transport?: { platform: string; history: boolean }): Promise<ArtifactMcpConfig> {
+  async config(key: string, transport?: { platform: string; history: boolean; attachments: boolean }): Promise<ArtifactMcpConfig> {
     const config = await this.connection(key).ready;
-    return transport ? { ...config, env: { ...config.env, AI_ARTIFACT_ALLOWED_TOOLS: JSON.stringify(['fetch_webpage', ...(transport.history ? ['fetch_channel_history'] : [])]) } } : config;
+    return transport ? { ...config, env: { ...config.env, AI_ARTIFACT_ALLOWED_TOOLS: JSON.stringify([
+      'fetch_webpage',
+      ...(transport.history ? ['fetch_channel_history'] : []),
+      ...(transport.attachments ? ['attach_file'] : []),
+    ]) } } : config;
   }
   async run<T>(key: string, run: ArtifactRun, files: SendAttachment[] | undefined, options: SendMessageOptions | undefined,
     action: (runtime: ArtifactTools, staged: SendAttachment[]) => Promise<T>): Promise<T> {
@@ -114,4 +118,3 @@ export function codexArtifactMcpOverride(config: ArtifactMcpConfig, replaceAll =
   const server = `{command=${JSON.stringify(config.command)},args=${JSON.stringify(config.args)},env={${env}},tools={${tools}},startup_timeout_sec=60,tool_timeout_sec=960}`;
   return replaceAll ? `mcp_servers={artifact_tools=${server}}` : `mcp_servers.artifact_tools=${server}`;
 }
-

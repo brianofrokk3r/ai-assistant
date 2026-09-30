@@ -3,14 +3,12 @@ import { config } from "dotenv";
 config();
 import { SessionManager } from "../sessionManager.js";
 import { createBot } from "../bot.js";
-import { reportProviderSecurityConfiguration } from "../common/providerSecurity.js";
 import { contributionReviewsEnabled } from "../common/githubContributionReviewWorker.js";
 import { githubContributionService } from "../common/githubContributions.js";
 import { discordSubject } from "../common/discordAccess.js";
 import { DiscordRuntime } from "./discordLifecycle.js";
 import { githubContributionsEnabled } from "../common/githubContributionConfig.js";
 import { githubContributionLimits } from "../common/githubContributionLimits.js";
-reportProviderSecurityConfiguration();
 if (githubContributionsEnabled())
     githubContributionLimits();
 const token = process.env.DISCORD_TOKEN;

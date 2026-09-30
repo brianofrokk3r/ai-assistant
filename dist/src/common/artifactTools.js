@@ -58,7 +58,7 @@ export class ArtifactTools {
     call(name, args) {
         const operation = this.queue.catch(() => { }).then(async () => {
             this.controller.signal.throwIfAborted();
-            if (this.options?.transportContext && !(name === 'fetch_webpage' || (name === 'fetch_channel_history' && this.options.transportContext.history)))
+            if (this.options?.transportContext && !(name === 'fetch_webpage' || (name === 'fetch_channel_history' && this.options.transportContext.history) || (name === 'attach_file' && this.options.transportContext.attachments)))
                 throw new Error('Tool unavailable for this transport.');
             if (args.run_id !== this.id)
                 throw new Error("This artifact run has expired or belongs to another response.");
