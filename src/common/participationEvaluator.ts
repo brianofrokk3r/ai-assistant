@@ -23,7 +23,9 @@ export class InvalidParticipationResponseError extends Error {
 }
 
 const EMOJI_SCOPES = ["custom", "unicode", "any"];
-const JEV_CHOICES = ["ignore", "direct_reply", "unsolicited_reply", "direct_react", "react"];
+/** Typed Choice vocabulary shared with host-side chat classification. */
+export const JEV_CHOICES = ["ignore", "direct_reply", "unsolicited_reply", "direct_react", "react"] as const;
+export type JevParticipationChoice = (typeof JEV_CHOICES)[number];
 
 /** The documented choice is an argmax; validate the full distribution before acting.
  * For equal maxima, use Jev's selected choice rather than object insertion order.
