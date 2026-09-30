@@ -182,6 +182,7 @@ test("Codex classifier runs independently with restricted settings and existing 
 const assert = require('node:assert/strict');
 const args = process.argv.slice(2);
 for (const flag of ['--ephemeral','--ignore-user-config','--ignore-rules','read-only','features.shell_tool=false','features.apps=false','mcp_servers={}']) assert.ok(args.includes(flag), flag);
+assert.ok(args.includes('web_search="disabled"'), 'web_search="disabled"');
 assert.ok(!args.includes('--session'));
 let input = ''; process.stdin.on('data', x => input += x); process.stdin.on('end', () => {
 assert.equal(input, 'synthetic classification');

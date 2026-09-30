@@ -4,16 +4,20 @@ import { devNull, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
+  CODEX_WEB_SEARCH_MODES,
+  configuredCodexWebSearchMode,
   configuredSecurityMode,
   configuredSitesEnabled,
   pathIsWithin,
   providerChildEnvironment,
+  reportProviderSecurityConfiguration,
   resolveConfiguredWorkspace,
   SENSITIVE_DIRECTORY_DENY_GLOBS,
   SENSITIVE_PATH_DENY_GLOBS,
   secureSystemPrompt,
   setupSecurityMode,
   setupSitesEnabled,
+  setupCodexWebSearchMode,
   workspacePathIsAllowed,
 } from "../src/common/providerSecurity.js";
 import {
@@ -63,6 +67,55 @@ test("security configuration preserves legacy installs and validates explicit va
   assert.equal(setupSecurityMode("unrestricted"), "unrestricted");
   assert.equal(setupSitesEnabled(), false);
   assert.equal(setupSitesEnabled("true"), true);
+});
+
+test("Codex hosted web search configuration defaults, normalizes, and validates", () => {
+  assert.deepEqual(CODEX_WEB_SEARCH_MODES, ["disabled", "cached", "indexed", "live"]);
+  assert.equal(configuredCodexWebSearchMode({}), "cached");
+  assert.equal(configuredCodexWebSearchMode({ CODEX_WEB_SEARCH_MODE: "   " }), "cached");
+  for (const mode of CODEX_WEB_SEARCH_MODES) {
+    assert.equal(
+      configuredCodexWebSearchMode({ CODEX_WEB_SEARCH_MODE: ` ${mode.toUpperCase()} ` }),
+      mode,
+    );
+  }
+  assert.equal(setupCodexWebSearchMode(), "cached");
+  assert.equal(setupCodexWebSearchMode(" INDEXED "), "indexed");
+  assert.throws(
+    () => configuredCodexWebSearchMode({ CODEX_WEB_SEARCH_MODE: "fresh" }),
+    /Invalid CODEX_WEB_SEARCH_MODE: fresh \(expected disabled, cached, indexed, live\)/,
+  );
+});
+
+test("shared startup reports hosted search separately from sandboxed-command networking", t => {
+  const lines: string[] = [];
+  t.mock.method(console, "log", (line: string) => { lines.push(line); });
+  reportProviderSecurityConfiguration({
+    PROVIDER: "codex",
+    AI_ASSISTANT_SECURITY_MODE: "shared",
+    AI_ASSISTANT_ENABLE_SITES: "false",
+    CODEX_WEB_SEARCH_MODE: "live",
+  });
+  assert.ok(lines.some(line => /hosted web search: live/i.test(line)));
+  assert.ok(lines.some(line => /sandboxed-command network access: package registry only/i.test(line)));
+  assert.equal(lines.filter(line => /hosted web search|sandboxed-command network access/i.test(line)).length, 2);
+});
+
+test("non-Codex startup diagnostics ignore invalid Codex hosted-search configuration", t => {
+  const lines: string[] = [];
+  t.mock.method(console, "log", (line: string) => { lines.push(line); });
+  t.mock.method(console, "warn", (line: string) => { lines.push(line); });
+  for (const provider of ["copilot", "opencode"]) {
+    for (const securityMode of ["shared", "unrestricted"]) {
+      assert.doesNotThrow(() => reportProviderSecurityConfiguration({
+        PROVIDER: provider,
+        AI_ASSISTANT_SECURITY_MODE: securityMode,
+        AI_ASSISTANT_ENABLE_SITES: "false",
+        CODEX_WEB_SEARCH_MODE: "not-a-mode",
+      }));
+    }
+  }
+  assert.equal(lines.some(line => /Codex hosted web search|sandboxed-command network access/i.test(line)), false);
 });
 
 test("shared provider child environments never inherit Discord or MCP secrets", () => {
