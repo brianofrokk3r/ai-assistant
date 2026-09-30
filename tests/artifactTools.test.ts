@@ -196,6 +196,20 @@ test("real MCP stdio transport lists and calls tools, isolates sessions, and rev
   assert.equal((await client.callTool({ name: "attach_file", arguments: { run_id: runId!, path: "hello.txt" } })).isError, true);
 });
 
+test("transport MCP allowlist exposes attach_file only when attachments are supported", async (t) => {
+  const sessions = new ArtifactToolSessions();
+  t.after(() => sessions.shutdown());
+  const slack = await sessions.config("slack", { platform: "slack", history: true, attachments: true });
+  const textOnly = await sessions.config("text-only", { platform: "cli", history: false, attachments: false });
+  assert.deepEqual(JSON.parse(slack.env.AI_ARTIFACT_ALLOWED_TOOLS), ["fetch_webpage", "fetch_channel_history", "attach_file"]);
+  assert.deepEqual(JSON.parse(textOnly.env.AI_ARTIFACT_ALLOWED_TOOLS), ["fetch_webpage"]);
+
+  const client = new Client({ name: "slack-artifact-test", version: "1" });
+  await client.connect(new StdioClientTransport({ ...slack, stderr: "pipe" }));
+  t.after(() => client.close());
+  assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ["fetch_channel_history", "fetch_webpage", "attach_file"]);
+});
+
 test("provider configuration enables only the host artifact bridge in shared mode", async (t) => {
   const workspace = await fixture(t);
   const previous = process.env.AI_ASSISTANT_SECURITY_MODE;

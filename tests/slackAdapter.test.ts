@@ -408,10 +408,27 @@ test('Slack signed upload URLs reject unsafe targets and never receive bot autho
  for (const url of ['http://files.slack.com/upload/v1/ticket','https://files.slack.com:444/upload/v1/ticket','https://token@files.slack.com/upload/v1/ticket','https://files.slack.com/files-pri/T-F1/file']) assert.throws(()=>slackUploadUrl(url));
  t.mock.method(globalThis,'fetch',async(url: string|URL|Request,options?:RequestInit)=>{
   assert.equal(String(url),'https://files.slack.com/upload/v1/ticket');assert.equal(options?.method,'POST');const headers=new Headers(options?.headers);assert.equal(headers.get('authorization'),null);assert.equal(headers.get('content-type'),'application/octet-stream');
+  assert.equal(options?.redirect,'error');
   assert.deepEqual(Buffer.from(await new Response(options?.body).arrayBuffer()),Buffer.from([0,255,1]));return new Response(null,{status:200});
  });
  const response=await new SlackWebApi('xoxb-secret').uploadFile('https://files.slack.com/upload/v1/ticket',Buffer.from([0,255,1]),new AbortController().signal);
   assert.equal(response.ok,true);
+});
+
+test('Slack cancellation aborts an in-flight text delivery and cannot mark it delivered', {timeout:2000}, async()=>{
+ const f=setup(); let began!:()=>void; const started=new Promise<void>(resolve=>{began=resolve}); let postSignal:AbortSignal|undefined;
+ try {
+  const original=f.api.call;
+  f.api.call=async(method,args,signal)=>{
+   if(method!=='chat.postMessage') return original(method,args,signal);
+   postSignal=signal;began();
+   return new Promise((_resolve,reject)=>signal!.addEventListener('abort',()=>reject(signal!.reason),{once:true}));
+  };
+  const turn=await f.adapter.receive(event('cancel-text-delivery','1700000003.000000','1700000001.000000'));
+  await started;await f.service.shutdown();
+  const result=await turn!.completion;
+  assert.equal(postSignal!.aborted,true);assert.equal(result.state,'interrupted');assert.equal(f.posts.length,0);
+ } finally { await f.close(); }
 });
 
 for (const failure of ['ticket', 'transfer', 'completion', 'rate-limit'] as const) test('Slack retains attachment output after '+failure+' delivery failure without a retry', async()=>{
