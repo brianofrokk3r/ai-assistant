@@ -17,7 +17,7 @@ export class SlackWebApi {
     uploadFile(url, data, signal) {
         const bytes = new Uint8Array(data);
         return fetch(slackUploadUrl(url), { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: bytes.buffer,
-            signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
+            redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
     }
     async call(method, args = {}, signal) {
         const response = await fetch('https://slack.com/api/' + method, {
@@ -367,7 +367,7 @@ export class SlackAdapter {
                     signal.throwIfAborted();
                     const result = await this.api.call('chat.postMessage', { channel: input.conversation.channelId, ...(input.conversation.threadId ? { thread_ts: input.conversation.threadId } : {}),
                         text: chars.slice(offset, offset + 3000).join(''), parse: 'none', unfurl_links: 'false', unfurl_media: 'false',
-                        client_msg_id: createHash('sha256').update(deliveryKey + ':' + offset).digest('hex').slice(0, 32).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5') });
+                        client_msg_id: createHash('sha256').update(deliveryKey + ':' + offset).digest('hex').slice(0, 32).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5') }, signal);
                     if (typeof result.ts === 'string') {
                         ids.push(result.ts);
                         sent.push({ position: result.ts, text: chars.slice(offset, offset + 3000).join('') });
