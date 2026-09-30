@@ -43,6 +43,11 @@ export interface AuthStatus {
 export interface StatusInfo {
   status: { version?: string };
   authStatus: AuthStatus;
+  /** Provider capability diagnostics kept distinct from authentication state. */
+  providerSecurity?: {
+    hostedWebSearch?: string;
+    sandboxedCommandNetwork?: string;
+  };
 }
 
 export type HistoryEvent =
@@ -202,4 +207,3 @@ export interface Provider {
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
-

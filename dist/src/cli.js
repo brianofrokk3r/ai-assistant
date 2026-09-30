@@ -6,7 +6,7 @@ import { resolve, dirname, join } from "path";
 import { homedir, tmpdir } from "os";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-import { setupSecurityMode, setupSitesEnabled } from "./common/providerSecurity.js";
+import { setupCodexWebSearchMode, setupSecurityMode, setupSitesEnabled } from "./common/providerSecurity.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname_local = dirname(__filename);
 // Config dir: ~/.ai-assistant/ or override via AI_ASSISTANT_CONFIG_DIR
@@ -101,11 +101,22 @@ async function setup() {
         const openaiKey = await promptVar(rl, "OpenAI API Key (optional if Codex CLI is logged in)", "OPENAI_API_KEY", existing, false);
         const codexModel = await promptVar(rl, "Default Codex model (e.g. gpt-5.6-sol)", "CODEX_MODEL", existing, false);
         const codexTimeout = await promptVar(rl, "Codex hard timeout in ms (default 3600000)", "CODEX_TIMEOUT_MS", existing, false);
+        const requestedWebSearchMode = await promptVar(rl, "Codex hosted web search (disabled | cached | indexed | live; default cached)", "CODEX_WEB_SEARCH_MODE", existing, false);
+        let webSearchMode;
+        try {
+            webSearchMode = setupCodexWebSearchMode(requestedWebSearchMode);
+        }
+        catch (err) {
+            console.error(`\n❌ ${err instanceof Error ? err.message : String(err)}`);
+            rl.close();
+            process.exit(1);
+        }
         lines.push(openaiKey ? `OPENAI_API_KEY=${openaiKey}` : "# OPENAI_API_KEY=");
         if (codexModel)
             lines.push(`CODEX_MODEL=${codexModel}`);
         if (codexTimeout)
             lines.push(`CODEX_TIMEOUT_MS=${codexTimeout}`);
+        lines.push(`CODEX_WEB_SEARCH_MODE=${webSearchMode}`);
     }
     else if (provider === "opencode") {
         const opencodeModel = await promptVar(rl, "Default OpenCode model (provider/model, e.g. openrouter/...)", "OPENCODE_MODEL", existing, false);
@@ -119,6 +130,11 @@ async function setup() {
         const copilotTimeout = await promptVar(rl, "Copilot hard timeout in ms (default 3600000)", "COPILOT_TIMEOUT_MS", existing, false);
         if (copilotTimeout)
             lines.push(`COPILOT_TIMEOUT_MS=${copilotTimeout}`);
+    }
+    // Do not erase a Codex choice when editing an installation that currently
+    // selects another provider.
+    if (provider !== "codex" && existing.CODEX_WEB_SEARCH_MODE !== undefined) {
+        lines.push(`CODEX_WEB_SEARCH_MODE=${setupCodexWebSearchMode(existing.CODEX_WEB_SEARCH_MODE)}`);
     }
     const progressInterval = await promptVar(rl, "Long-run progress update interval in ms (default 60000)", "AI_PROGRESS_INTERVAL_MS", existing, false);
     if (progressInterval)

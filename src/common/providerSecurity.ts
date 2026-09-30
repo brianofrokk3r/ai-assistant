@@ -6,6 +6,8 @@ type Environment = Record<string, string | undefined>;
 
 export const SECURITY_MODES = ["shared", "unrestricted"] as const;
 export type SecurityMode = (typeof SECURITY_MODES)[number];
+export const CODEX_WEB_SEARCH_MODES = ["disabled", "cached", "indexed", "live"] as const;
+export type CodexWebSearchMode = (typeof CODEX_WEB_SEARCH_MODES)[number];
 
 /**
  * Unset preserves the pre-hardening behavior for existing installations.
@@ -45,11 +47,29 @@ export function setupSitesEnabled(configured?: string): boolean {
   return configuredSitesEnabled({ AI_ASSISTANT_ENABLE_SITES: configured?.trim() || "false" });
 }
 
+/** Hosted Codex search is independent of network access for sandboxed commands. */
+export function configuredCodexWebSearchMode(source: Environment = process.env): CodexWebSearchMode {
+  const configured = source.CODEX_WEB_SEARCH_MODE?.trim().toLowerCase();
+  if (!configured) return "cached";
+  if (!CODEX_WEB_SEARCH_MODES.includes(configured as CodexWebSearchMode)) {
+    throw new Error(
+      `Invalid CODEX_WEB_SEARCH_MODE: ${configured} (expected ${CODEX_WEB_SEARCH_MODES.join(", ")})`,
+    );
+  }
+  return configured as CodexWebSearchMode;
+}
+
+/** New setup recommends cached while preserving and validating an existing choice. */
+export function setupCodexWebSearchMode(configured?: string): CodexWebSearchMode {
+  return configuredCodexWebSearchMode({ CODEX_WEB_SEARCH_MODE: configured?.trim() || "cached" });
+}
+
 export function reportProviderSecurityConfiguration(
   source: Environment = process.env,
 ): void {
   const mode = configuredSecurityMode(source);
   const sitesEnabled = configuredSitesEnabled(source);
+  const webSearchMode = configuredCodexWebSearchMode(source);
   if (mode === "unrestricted") {
     console.warn(
       "[security] AI_ASSISTANT_SECURITY_MODE=unrestricted: Discord sessions retain the provider's full legacy capabilities and may act with the operator's connected identities. Use this only on a private, trusted server.",
@@ -60,9 +80,10 @@ export function reportProviderSecurityConfiguration(
     console.warn(
       "[security] Shared mode is active with ChatGPT Sites enabled. Discord users can create, update, and publish Sites through the operator's ChatGPT account; other connected apps remain restricted.",
     );
-    return;
+  } else {
+    console.log("[security] Shared provider isolation is active; external mutation is disabled.");
   }
-  console.log("[security] Shared provider isolation is active; external mutation is disabled.");
+  console.log(`[security] Codex hosted web search: ${webSearchMode}. Sandboxed-command network access: package registry only${sitesEnabled ? " plus ChatGPT Sites source pushes" : ""}.`);
 }
 
 const COMMON_ENVIRONMENT_KEYS = [
