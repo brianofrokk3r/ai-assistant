@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { RunTimeoutError } from "../providers/types.js";
 import { validateSchedule, nextOccurrences, scheduleHasStarted } from "./cron.js";
 import { SchedulerLeaseHeldError } from "./store.js";
+import { schedulePlatform } from "./types.js";
 import { retainVerifiedLookups } from "./lookups.js";
 export function scheduleLimits(env = process.env) {
     const number = (key, fallback, min, max) => {
@@ -20,6 +21,8 @@ export class ScheduleAccessError extends Error {
 }
 export class DeliveryRejectedError extends Error {
 }
+export class DeliveryUncertainError extends Error {
+}
 export class Scheduler {
     store;
     access;
@@ -37,6 +40,7 @@ export class Scheduler {
         this.limits = limits;
         this.now = now;
     }
+    get platform() { return this.adapter.platform ?? "discord"; }
     start() {
         if (!this.stopped)
             return;
@@ -88,7 +92,7 @@ export class Scheduler {
         this.store.assertLease(this.now());
     }
     canManage(subject, task) {
-        return this.access.can(subject, "schedule.manage.guild", task) || this.access.can(subject, "schedule.manage.own", task);
+        return this.access.can(subject, "schedule.manage.tenant", task) || this.access.can(subject, "schedule.manage.guild", task) || this.access.can(subject, "schedule.manage.own", task);
     }
     requireManage(subject, task) {
         if (!this.canManage(subject, task))
@@ -100,15 +104,24 @@ export class Scheduler {
         }
     }
     async create(subject, input) {
+        const task = await this.prepareCreate(subject, input);
+        this.store.create(task, this.limits.maxOwner, this.limits.maxGuild);
+        return task;
+    }
+    async prepareCreate(subject, input, id = randomUUID()) {
         this.assertAvailable();
         this.requireCreate(subject, input);
-        const task = { ...input, id: randomUUID(), ownerId: subject.userId, createdAt: this.now(), revision: 1, enabled: true, nextRunAt: 0 };
+        const task = { ...input, id, ownerId: subject.userId, createdAt: this.now(), revision: 1, enabled: true, nextRunAt: 0 };
         this.validate(task);
         await this.adapter.authorize(task, subject.userId);
         this.assertAvailable();
         this.validate(task);
-        this.store.create(task, this.limits.maxOwner, this.limits.maxGuild);
         return task;
+    }
+    commitPrepared(task, proposalId) {
+        this.assertAvailable();
+        const result = this.store.createFromProposal(task, this.limits.maxOwner, this.limits.maxGuild, proposalId);
+        return this.store.get(result.resultId) ?? task;
     }
     validate(task) {
         if (!["message", "ai"].includes(task.kind) || !task.content.trim() || task.content.length > 6000)
@@ -200,7 +213,9 @@ export class Scheduler {
             throw new Error(`Task is paused. Use /schedule resume id:${id} before running it.`);
         if (this.active.size >= this.limits.concurrency)
             throw new Error("Scheduler is busy; try again later.");
-        const claimed = this.store.claim(id, this.now(), this.limits.minimumMs, true);
+        if (schedulePlatform(task) !== this.platform)
+            throw new ScheduleAccessError("This schedule belongs to a different platform worker.");
+        const claimed = this.store.claim(id, this.now(), this.limits.minimumMs, true, this.platform);
         if (!claimed)
             throw new Error("Task is already running or within its minimum run interval.");
         this.launch(claimed.task, claimed.run);
@@ -235,11 +250,11 @@ export class Scheduler {
                     return;
                 throw error;
             }
-            this.store.recover(this.now());
+            this.store.recover(this.now(), this.platform);
             this.ownsLease = true;
         }
         this.store.assertLease(this.now());
-        for (const run of this.store.pendingRuns()) {
+        for (const run of this.store.pendingRuns(this.platform)) {
             if (this.active.size >= this.limits.concurrency)
                 break;
             if (this.active.has(run.id))
@@ -248,7 +263,7 @@ export class Scheduler {
             if (task)
                 this.launch(task, run);
         }
-        for (const task of this.store.list()) {
+        for (const task of this.store.list(undefined, this.platform)) {
             if (this.store.expire(task.id, this.now()))
                 continue;
             if (!task.enabled || !scheduleHasStarted(task, this.now()) || task.nextRunAt > this.now())
@@ -258,7 +273,7 @@ export class Scheduler {
                 this.store.save({ ...task, nextRunAt: nextOccurrences(task.cron, task.timezone, this.now(), 1)[0] });
                 continue;
             }
-            const claimed = this.store.claim(task.id, this.now(), this.limits.minimumMs);
+            const claimed = this.store.claim(task.id, this.now(), this.limits.minimumMs, false, this.platform);
             if (claimed)
                 this.launch(claimed.task, claimed.run);
         }
@@ -336,6 +351,8 @@ export class Scheduler {
                 run.state = "cancelled";
             else if (error instanceof DeliveryRejectedError)
                 run.state = "delivery_failed";
+            else if (error instanceof DeliveryUncertainError)
+                run.state = "uncertain";
             else if (run.state === "sending" || (error instanceof RunTimeoutError && !error.cancellationConfirmed))
                 run.state = "uncertain";
             else

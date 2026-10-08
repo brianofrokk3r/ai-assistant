@@ -3,7 +3,7 @@ import type { AccessPolicy, AccessSubject } from "../common/accessPolicy.js";
 import { RunTimeoutError } from "../providers/types.js";
 import { validateSchedule, nextOccurrences, scheduleHasStarted } from "./cron.js";
 import { ScheduleStore, SchedulerLeaseHeldError } from "./store.js";
-import type { DeliveryPart, ScheduledTask, TaskRun } from "./types.js";
+import { schedulePlatform, type DeliveryPart, type SchedulePlatform, type ScheduledTask, type TaskRun } from "./types.js";
 import { retainVerifiedLookups } from "./lookups.js";
 
 export interface ScheduleLimits { minimumMs: number; maxOwner: number; maxGuild: number; concurrency: number; timeoutMs: number }
@@ -21,7 +21,9 @@ export function scheduleLimits(env = process.env): ScheduleLimits {
 }
 export class ScheduleAccessError extends Error {}
 export class DeliveryRejectedError extends Error {}
+export class DeliveryUncertainError extends Error {}
 export interface ScheduleAdapter {
+  readonly platform?: SchedulePlatform;
   authorize(task: ScheduledTask, actorId?: string): Promise<void>;
   generate(task: ScheduledTask, run: TaskRun, timeoutMs: number): Promise<DeliveryPart[]>;
   send(task: ScheduledTask, part: DeliveryPart, nonce: string, beforeSend: () => void): Promise<string>;
@@ -33,6 +35,7 @@ export class Scheduler {
   private ownsLease = false;
   constructor(readonly store: ScheduleStore, readonly access: AccessPolicy, readonly adapter: ScheduleAdapter,
     readonly limits = scheduleLimits(), private now = Date.now) {}
+  private get platform(): SchedulePlatform { return this.adapter.platform ?? "discord"; }
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
@@ -58,7 +61,7 @@ export class Scheduler {
     this.store.assertLease(this.now());
   }
   canManage(subject: AccessSubject, task: ScheduledTask): boolean {
-    return this.access.can(subject, "schedule.manage.guild", task) || this.access.can(subject, "schedule.manage.own", task);
+    return this.access.can(subject, "schedule.manage.tenant", task) || this.access.can(subject, "schedule.manage.guild", task) || this.access.can(subject, "schedule.manage.own", task);
   }
   requireManage(subject: AccessSubject, task: ScheduledTask): void {
     if (!this.canManage(subject, task)) throw new ScheduleAccessError("You cannot manage this schedule.");
@@ -69,15 +72,24 @@ export class Scheduler {
     }
   }
   async create(subject: AccessSubject, input: Omit<ScheduledTask, "id" | "ownerId" | "createdAt" | "revision" | "nextRunAt" | "enabled">): Promise<ScheduledTask> {
+    const task = await this.prepareCreate(subject, input);
+    this.store.create(task, this.limits.maxOwner, this.limits.maxGuild);
+    return task;
+  }
+  async prepareCreate(subject: AccessSubject, input: Omit<ScheduledTask, "id" | "ownerId" | "createdAt" | "revision" | "nextRunAt" | "enabled">, id: string = randomUUID()): Promise<ScheduledTask> {
     this.assertAvailable();
     this.requireCreate(subject, input);
-    const task: ScheduledTask = { ...input, id: randomUUID(), ownerId: subject.userId, createdAt: this.now(), revision: 1, enabled: true, nextRunAt: 0 };
+    const task: ScheduledTask = { ...input, id, ownerId: subject.userId, createdAt: this.now(), revision: 1, enabled: true, nextRunAt: 0 };
     this.validate(task);
     await this.adapter.authorize(task, subject.userId);
     this.assertAvailable();
     this.validate(task);
-    this.store.create(task, this.limits.maxOwner, this.limits.maxGuild);
     return task;
+  }
+  commitPrepared(task: ScheduledTask, proposalId: string): ScheduledTask {
+    this.assertAvailable();
+    const result = this.store.createFromProposal(task, this.limits.maxOwner, this.limits.maxGuild, proposalId);
+    return this.store.get(result.resultId) ?? task;
   }
   private validate(task: ScheduledTask): void {
     if (!["message", "ai"].includes(task.kind) || !task.content.trim() || task.content.length > 6000) throw new Error("Provide message text or a prompt of 1–6000 characters.");
@@ -95,7 +107,7 @@ export class Scheduler {
     }
     task.nextRunAt = validateSchedule(task.cron, task.timezone, this.limits.minimumMs, this.now(), task.startAt);
   }
-  async edit(subject: AccessSubject, id: string, patch: Partial<Pick<ScheduledTask, "channelId" | "content" | "cron" | "timezone" | "contextMessages" | "startAt" | "endAt">>): Promise<ScheduledTask> {
+  async edit(subject: AccessSubject, id: string, patch: Partial<Pick<ScheduledTask, "channelId" | "destination" | "content" | "cron" | "timezone" | "contextMessages" | "startAt" | "endAt" | "provider" | "model" | "reasoning">>): Promise<ScheduledTask> {
     this.assertAvailable();
     const before = this.requireTask(subject, id);
     this.requireCreate(subject, before);
@@ -157,7 +169,8 @@ export class Scheduler {
     this.assertWithinDates(task);
     if (!task.enabled) throw new Error(`Task is paused. Use /schedule resume id:${id} before running it.`);
     if (this.active.size >= this.limits.concurrency) throw new Error("Scheduler is busy; try again later.");
-    const claimed = this.store.claim(id, this.now(), this.limits.minimumMs, true);
+    if (schedulePlatform(task) !== this.platform) throw new ScheduleAccessError("This schedule belongs to a different platform worker.");
+    const claimed = this.store.claim(id, this.now(), this.limits.minimumMs, true, this.platform);
     if (!claimed) throw new Error("Task is already running or within its minimum run interval.");
     this.launch(claimed.task, claimed.run);
     return claimed.run.id;
@@ -181,17 +194,17 @@ export class Scheduler {
     if (!this.ownsLease) {
       try { this.store.acquire(this.now()); }
       catch (error) { if (error instanceof SchedulerLeaseHeldError) return; throw error; }
-      this.store.recover(this.now());
+      this.store.recover(this.now(), this.platform);
       this.ownsLease = true;
     }
     this.store.assertLease(this.now());
-    for (const run of this.store.pendingRuns()) {
+    for (const run of this.store.pendingRuns(this.platform)) {
       if (this.active.size >= this.limits.concurrency) break;
       if (this.active.has(run.id)) continue;
       const task = this.store.get(run.taskId);
       if (task) this.launch(task, run);
     }
-    for (const task of this.store.list()) {
+    for (const task of this.store.list(undefined, this.platform)) {
       if (this.store.expire(task.id, this.now())) continue;
       if (!task.enabled || !scheduleHasStarted(task, this.now()) || task.nextRunAt > this.now()) continue;
       // Do not accumulate a backlog while all worker slots are occupied.
@@ -199,7 +212,7 @@ export class Scheduler {
         this.store.save({ ...task, nextRunAt: nextOccurrences(task.cron, task.timezone, this.now(), 1)[0] });
         continue;
       }
-      const claimed = this.store.claim(task.id, this.now(), this.limits.minimumMs);
+      const claimed = this.store.claim(task.id, this.now(), this.limits.minimumMs, false, this.platform);
       if (claimed) this.launch(claimed.task, claimed.run);
     }
   }
@@ -267,6 +280,7 @@ export class Scheduler {
       console.error(`[scheduler] Run ${run.id}:`, error);
       if (error instanceof ScheduleAccessError) run.state = "cancelled";
       else if (error instanceof DeliveryRejectedError) run.state = "delivery_failed";
+      else if (error instanceof DeliveryUncertainError) run.state = "uncertain";
       else if (run.state === "sending" || (error instanceof RunTimeoutError && !error.cancellationConfirmed)) run.state = "uncertain";
       else run.state = "failed";
       this.store.saveRun(run);

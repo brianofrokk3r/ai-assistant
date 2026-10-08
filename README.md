@@ -457,8 +457,11 @@ Authorization is centralized in `src/common/accessPolicy.ts`. Existing
 `DISCORD_ALLOWED_USERS` and `DISCORD_ADMIN_USERS` behavior remains compatible,
 including the open-admin fallback for existing commands. Optional
 `DISCORD_RIGHTS_FILE` JSON grants add named capabilities to individual Discord
-users or guild-scoped Discord roles. The file is operator-controlled, must be
-outside agent workspaces, and is validated at startup; shared mode rejects paths
+users or guild-scoped Discord roles. `SLACK_RIGHTS_FILE` (or the shared
+`SCHEDULE_RIGHTS_FILE`) uses the same format with `"platform":"slack"`, a
+`tenantId`, and a Slack user ID. The file is operator-controlled, must be
+outside agent workspaces, is validated at startup, and is refreshed for schedule
+authorization so revocation does not require restart; shared mode rejects paths
 inside the provider workspace root, including symlink targets. Restart to reload changes.
 See [`rights.example.json`](rights.example.json) for a complete example with
 placeholder IDs. Discord's Administrator permission does **not** automatically
@@ -476,6 +479,7 @@ grant bot administration.
 | `schedule.ai.create` | AI tasks; explicit opt-in for trusted users or guild roles |
 | `schedule.manage.own` | Inspect and manage owned tasks |
 | `schedule.manage.guild` | Inspect and manage all tasks in the granted guild |
+| `schedule.manage.tenant` | Inspect and manage tasks in the granted Discord guild or Slack workspace |
 
 The `member` preset grants `chat.use`. The `scheduler` preset adds
 `schedule.message.create` and `schedule.manage.own`. The `server-admin` preset
@@ -539,8 +543,8 @@ its end date, then use `/schedule resume`. Ended tasks retain their history and
 count toward quotas until deleted. Like pausing, ending cannot recall messages
 already being sent or undo provider tool effects; active inference may still finish.
 
-Only ordinary guild text channels are supported initially; DMs, threads, forum
-containers, natural-language schedule creation, and one-time tasks are deferred.
+Discord schedules support ordinary guild text channels; Discord DMs, threads,
+forum containers, natural-language creation, and one-time tasks remain deferred.
 Cron accepts five fields (minute, hour, day of month, month, weekday) and requires
 an explicit IANA timezone. Local schedules use cron-parser's daylight-saving
 semantics: the UTC execution time changes with the local clock. Use UTC when
@@ -627,6 +631,79 @@ delivery is not guaranteed, including the crash window between a successful send
 and saving its message ID. Pausing or editing suppresses pending output, but cannot
 recall a message already being sent or undo provider tool effects.
 
+### Slack scheduled actions
+
+With the Slack adapter selected, `SCHEDULES_ENABLED=true` enables the same store,
+worker lease, recurrence validation, limits, recovery, and run history used by
+Discord. Slack is only the control and delivery surface: schedules invoke the
+agent internally and post through `chat.postMessage`; Slack `/remind`, Slackbot,
+Workflow Builder, and bot-authored events never trigger an agent run.
+
+The primary flow is a mention in an allowed channel/thread, or a message in an
+allowed one-to-one DM:
+
+```text
+@agent Schedule every Monday at 9 AM to search for latest news about AI safety and post a source-linked summary here
+@agent Remind us every weekday at 4:30 PM to update the release notes
+@agent Schedule every day at 8 AM to summarize recent channel context
+```
+
+The host resolves supported recurrence phrases, defaults the destination to the
+current channel or thread, and replies with kind, action, cadence, timezone,
+dates, destination, context count, provider/model, and upcoming occurrences.
+Nothing is saved until the same actor replies in the same conversation with
+`@agent confirm proposal_<id>` (the mention is unnecessary in a DM). Proposals
+expire after ten minutes, are bound to the authenticated actor and conversation,
+and are consumed once. Repeating a confirmation returns the original schedule.
+Use `@agent cancel proposal_<id>` to discard one. Unsupported or ambiguous
+recurrences and underspecified “latest news” requests produce a clarification.
+“First business day” is not representable by the five-field cron engine.
+
+Deterministic fallback syntax is:
+
+```text
+@agent schedule create --kind message --content "Submit timesheets" --cron "0 16 * * 5" --timezone America/New_York
+@agent schedule create --kind ai --content "Research platform releases with source links" --cron "0 9 * * 1" --timezone America/New_York --provider codex --model <model-id> --reasoning low --context-messages 20 --start-at 2026-11-01T09:00:00-05:00 --end-at 2027-01-01T00:00:00-05:00
+@agent schedule list
+@agent schedule inspect <schedule-id>
+@agent schedule edit <schedule-id> --content "New action" --cron "30 9 * * 1-5"
+@agent schedule pause|resume|delete|run-now <schedule-id>
+@agent schedule retry-delivery <schedule-id> <run-id>
+```
+
+Create and material edit return a confirmation proposal. Inspect includes saved
+settings, status, recent outcomes, timestamps, and Slack permalinks when available.
+Sensitive details are redacted when inspection occurs outside the saved audience.
+Delivery retry uses saved completed output without running the provider again.
+Ambiguous sends (`internal_error`, `fatal_error`, malformed replies, connection
+loss, timeout, or interruption after sending begins) remain `uncertain` and are
+never replayed automatically. Accepted output parts are checkpointed separately.
+This is not an exactly-once guarantee for provider calls or external posts.
+
+Slack scheduling requires explicit named rights in addition to
+`SLACK_ALLOWED_USERS`; unattended AI access is never inferred from chat access.
+The example rights file shows a workspace-scoped user grant. The worker rechecks
+the owner allowlist and grants, workspace/installation, destination allowlist,
+bot and owner membership, unsupported shared-channel flags, saved audience,
+dates, and revision before execution and delivery. One-to-one DMs are supported;
+group DMs and Slack Connect/shared channels are not.
+
+The first release runs one selected chat adapter per process. A worker claims and
+recovers only its active platform, though one database can hold both platforms.
+Do not run Discord and Slack processes concurrently against that file: the single
+60-second lease remains authoritative. Schema v2 migration is transactional and
+writes `<database>.pre-v2-backup` before changing an existing database. To roll
+back, stop every worker, retain the current database for diagnosis, and restore
+that backup before starting the old binary.
+
+Troubleshooting: “Scheduling is disabled” means `SCHEDULES_ENABLED` was not
+exactly `true`; permission errors require a valid current named grant, not only a
+Slack allowlist entry. An inaccessible destination must be allowlisted and have
+both owner and bot membership. A waiting worker begins after the previous
+60-second lease expires. Provider/model failures remain in run inspection; a
+definite delivery rejection can use `retry-delivery`, while an `uncertain` send
+must be checked in Slack and resolved manually rather than replayed.
+
 ## Environment variable reference
 
 The tables below cover every setting read or explicitly passed to providers by this repository, including advanced settings missing from the starter template. Provider CLIs can have additional configuration of their own; in `unrestricted` mode they inherit the full process environment.
@@ -710,6 +787,12 @@ See [Slack adapter setup](#slack-adapter) for app scopes, token access, startup 
 | `SLACK_INSTALLATION_ID` | `default` | Stable logical installation namespace for sessions. Changing it creates separate session identities. |
 | `SLACK_HISTORY_TOKEN` | `SLACK_BOT_TOKEN` | Optional separate OAuth credential with access to channel and thread history in the same workspace. |
 | `SLACK_EXCLUDED_CONTEXT_USERS` | Empty | Comma-separated IDs excluded from fetched history. Do not include spaces around commas. Policy changes rebuild retained context. |
+| `SLACK_RIGHTS_FILE` | Unset | Named Slack grants; use `platform: slack`, `tenantId`, and a user ID. Reloaded on schedule decisions. |
+| `SLACK_ADMIN_USERS` | Empty | Explicit workspace administrators. Unlike the chat allowlist, grants tenant-wide schedule administration. |
+| `SCHEDULE_DEFAULT_TIMEZONE` | `UTC` | Trusted IANA timezone used when a Slack request omits one. Always shown before confirmation. |
+| `SCHEDULE_DEFAULT_PROVIDER` | `PROVIDER` | Provider saved explicitly on new Slack AI schedules. |
+| `SCHEDULE_DEFAULT_MODEL` | Unset | Model saved on conversational Slack AI schedules; required unless deterministic create supplies `--model`. |
+| `SCHEDULE_DEFAULT_REASONING` | Unset | Optional reasoning setting saved on conversational Slack AI schedules. |
 
 ### Run timing and output files
 
@@ -717,6 +800,14 @@ Provider timing and progress settings require integer values of at least `10`; i
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `SCHEDULES_ENABLED` | `false` | Starts the active adapter's scheduler and Slack frontend when exactly `true`. Disabled mode creates no lease or schedule worker. |
+| `SCHEDULE_DB_PATH` | Slack: `<AI_ASSISTANT_STATE_DIR>/schedules.sqlite`; Discord: existing config path | Optional Slack database override. A database may contain both platforms, but only one process may hold its worker lease. |
+| `SCHEDULE_RIGHTS_FILE` | Platform rights-file setting | Shared named-rights source, taking precedence over Slack/Discord-specific rights paths. |
+| `SCHEDULE_MIN_INTERVAL_MINUTES` | `15` | Minimum interval between starts, including manual runs. |
+| `SCHEDULE_MAX_PER_USER` | `10` | Owner quota. Discord keeps its existing cross-guild owner semantics; Slack owners are namespaced by workspace. |
+| `SCHEDULE_MAX_PER_GUILD` | `50` | Existing tenant quota; for Slack this applies per namespaced workspace. |
+| `SCHEDULE_CONCURRENCY` | `2` | Maximum concurrent runs for the active worker. |
+| `SCHEDULE_AI_TIMEOUT_MS` | `600000` | Host cap for scheduled AI generation. |
 | `AI_PROGRESS_INTERVAL_MS` | `60000` (1 minute) | Interval between progress messages during long runs, for all providers. |
 | `AI_CANCELLATION_GRACE_MS` | `5000` (5 seconds) | How long to wait for a provider to confirm cancellation after a timeout. |
 | `COPILOT_TIMEOUT_MS` | `3600000` (1 hour) | Hard limit for a Copilot run; the active run is aborted on timeout. |

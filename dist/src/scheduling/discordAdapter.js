@@ -14,6 +14,7 @@ export class DiscordScheduleAdapter {
     client;
     access;
     sessions;
+    platform = "discord";
     constructor(client, access, sessions) {
         this.client = client;
         this.access = access;

@@ -19,6 +19,7 @@ export interface TransportContext {
   platform: "slack" | "cli";
   history: boolean;
   attachments: boolean;
+  schedules?: boolean;
   /** Host-derived Jev classification for this turn. Absent preserves the Discord profile. */
   classification?: ChatClassification;
 }
@@ -143,9 +144,13 @@ export function resolveSessionContext(
   if (request.transportContext) {
     // Only claim a capability the transport actually resolved for this turn; an
     // admitted direct-message turn cannot also be told that DMs are unavailable.
-    const unavailable = request.transportContext.classification?.form === 'direct'
-      ? 'Persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.'
-      : 'DMs, persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.';
+    const unavailable = request.transportContext.schedules
+      ? (request.transportContext.classification?.form === 'direct'
+        ? 'Persistent memory, ruleset management and GitHub contribution tools are unavailable. Host-managed schedules are available through confirmed platform schedule requests; never invent a saved schedule or claim persistence before host confirmation.'
+        : 'DMs, persistent memory, ruleset management and GitHub contribution tools are unavailable. Host-managed schedules are available through confirmed platform schedule requests; never invent a saved schedule or claim persistence before host confirmation.')
+      : request.transportContext.classification?.form === 'direct'
+        ? 'Persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.'
+        : 'DMs, persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.';
     resolved.push({ id: 'transport', instructions: [
       'You are responding through ' + request.transportContext.platform + '.',
       request.transportContext.attachments ? 'You can attach validated files to this response using the artifact tools.' : 'Output is text-only. File delivery is unavailable.',

@@ -8,6 +8,8 @@ export interface TextEngine {
   contextIdentity?(key: string): string;
   sendMessage(key: string, prompt: string, attachments?: SendAttachment[], options?: SendMessageOptions): Promise<TurnOutput>;
   resetSession(key: string): Promise<void>;
+  configureSession?(key: string, provider: string, model: string, reasoning?: string): Promise<void>;
+  forgetSession?(key: string): Promise<void>;
   shutdown(): Promise<void>;
 }
 export async function createTextEngine(name: string, directory: string): Promise<TextEngine> {
@@ -24,6 +26,12 @@ export async function createTextEngine(name: string, directory: string): Promise
       },
       sendMessage: (key, prompt, attachments, options) => manager.sendMessage(key, prompt, attachments, options),
       resetSession: key => manager.resetSession(key),
+      async configureSession(key, provider, model, reasoning) {
+        await manager.setSessionProvider(key, provider);
+        await manager.setModel(key, model);
+        if (reasoning) await manager.setReasoningEffort(key, reasoning);
+      },
+      forgetSession: key => manager.forgetSession(key),
       shutdown: () => manager.shutdown(),
     };
   }
@@ -44,6 +52,8 @@ export async function createTextEngine(name: string, directory: string): Promise
       return output;
     },
     async resetSession(key) { try { unlinkSync(file(key)); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; } },
+    async configureSession() {},
+    async forgetSession(key) { try { unlinkSync(file(key)); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; } },
     async shutdown() {},
   };
 }

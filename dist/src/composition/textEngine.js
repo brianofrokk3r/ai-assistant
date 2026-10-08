@@ -17,6 +17,13 @@ export async function createTextEngine(name, directory) {
             },
             sendMessage: (key, prompt, attachments, options) => manager.sendMessage(key, prompt, attachments, options),
             resetSession: key => manager.resetSession(key),
+            async configureSession(key, provider, model, reasoning) {
+                await manager.setSessionProvider(key, provider);
+                await manager.setModel(key, model);
+                if (reasoning)
+                    await manager.setReasoningEffort(key, reasoning);
+            },
+            forgetSession: key => manager.forgetSession(key),
             shutdown: () => manager.shutdown(),
         };
     }
@@ -51,6 +58,14 @@ export async function createTextEngine(name, directory) {
             return output;
         },
         async resetSession(key) { try {
+            unlinkSync(file(key));
+        }
+        catch (e) {
+            if (e.code !== 'ENOENT')
+                throw e;
+        } },
+        async configureSession() { },
+        async forgetSession(key) { try {
             unlinkSync(file(key));
         }
         catch (e) {

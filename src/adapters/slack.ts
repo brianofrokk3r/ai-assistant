@@ -8,12 +8,22 @@ import { TEXT_CAPABILITIES, sessionKey, type IncomingTurn, type TurnHandle, type
 import { createTextEngine, type TextEngine } from '../composition/textEngine.js';
 import { configuredSecurityMode } from '../common/providerSecurity.js';
 import { classifyChat, type ChatClassification } from '../common/chatClassification.js';
+import { createAccessPolicy } from '../common/accessPolicy.js';
+import { normalizeProviderName, PROVIDERS, type ProviderName } from '../providers/types.js';
+import { ScheduleStore } from '../scheduling/store.js';
+import { Scheduler } from '../scheduling/engine.js';
+import { ScheduleService } from '../scheduling/service.js';
+import { SlackScheduleAdapter } from '../scheduling/slackAdapter.js';
+import { SlackScheduleFrontend } from '../scheduling/slackCommands.js';
 export interface SlackResponse { ok: boolean; error?: string; [key: string]: unknown }
 export interface SlackApi {
   downloadFile?(url: string, signal: AbortSignal): Promise<Response>;
   /** Posts raw bytes to a validated Slack signed-upload URL, without credentials. */
   uploadFile?(url: string, data: Buffer, signal: AbortSignal): Promise<Response>;
   call(method: string, args?: Record<string, string>, signal?: AbortSignal): Promise<SlackResponse>;
+}
+export class SlackApiError extends Error {
+  constructor(message: string, readonly status?: number, readonly code?: string, readonly retryAfterSeconds?: number) { super(message); }
 }
 /** Credentials remain in this host client, never in provider context or persisted turns. */
 export class SlackWebApi implements SlackApi {
@@ -29,10 +39,15 @@ export class SlackWebApi implements SlackApi {
       method: 'POST', headers: { authorization: 'Bearer ' + this.token, 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(args), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
     });
-    if (response.status === 429) throw new Error('Slack rate limited; retry after ' + (response.headers.get('retry-after') ?? 'unknown') + ' seconds.');
-    if (!response.ok) throw new Error('Slack request failed.');
-    const data = await response.json() as SlackResponse;
-    if (!data.ok) throw new Error('Slack API rejected request: ' + (data.error ?? 'unknown'));
+    if (response.status === 429) {
+      const retry = Number(response.headers.get('retry-after'));
+      throw new SlackApiError('Slack rate limited.', 429, 'ratelimited', Number.isFinite(retry) && retry >= 0 ? retry : undefined);
+    }
+    if (!response.ok) throw new SlackApiError('Slack request failed.', response.status);
+    let data: SlackResponse;
+    try { data = await response.json() as SlackResponse; }
+    catch { throw new SlackApiError('Slack returned an unreadable response.', response.status, 'malformed_response'); }
+    if (!data.ok) throw new SlackApiError('Slack API rejected request: ' + (data.error ?? 'unknown'), response.status, data.error);
     return data;
   }
 }
@@ -144,7 +159,8 @@ export class SlackAdapter {
   private readonly fallbackContextIdentity = randomUUID();
   private readonly sessions = new Set<string>();
   constructor(private readonly config: SlackConfig, private readonly api: SlackApi, private readonly historyApi: SlackApi,
-    private readonly engine: TextEngine, private readonly service: ConversationService, private readonly maxSessions = 1000) {
+    private readonly engine: TextEngine, private readonly service: ConversationService, private readonly maxSessions = 1000,
+    private readonly schedules?: SlackScheduleFrontend) {
     mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
     for (const file of readdirSync(config.stateDirectory)) if (/^[a-f0-9]{64}\.json$/.test(file)) this.sessions.add(join(config.stateDirectory, file));
   }
@@ -217,6 +233,7 @@ export class SlackAdapter {
   }
   async receive(payload: Record<string,unknown>): Promise<TurnHandle | undefined> {
     const input = this.normalize(payload); if (!input) return;
+    if (this.schedules && await this.schedules.handle(input)) return;
     const source = payload.event as Record<string, unknown>;
     return this.submit(input, fingerprint({ authorId: input.actor.userId, text: String(source.text), revision: JSON.stringify(source.edited ?? null) }), source.files ?? (source.subtype === 'file_share' ? null : undefined));
   }
@@ -251,7 +268,7 @@ export class SlackAdapter {
     const port = new SlackHistory(input.conversation.kind === 'direct' ? this.api : this.historyApi, input.conversation, authorized, this.config.excludedAuthors);
     return this.service.submit(input, {
       platform: 'slack', tenantId: this.config.teamId, installationId: this.config.installationId,
-      audience: sessionAudience, capabilities: { ...TEXT_CAPABILITIES, history: true, attachments: true, progress: false, directMessages: true },
+      audience: sessionAudience, capabilities: { ...TEXT_CAPABILITIES, history: true, attachments: true, progress: false, directMessages: true, schedules: Boolean(this.schedules) },
       retryGeneratedDelivery: true,
       onError: error => console.error('[slack] Turn execution error: ' + slackDiagnostic(error)),
       authorize: async (_i, stage, output, signal) => {
@@ -298,7 +315,7 @@ export class SlackAdapter {
         if (!sourceFingerprint) throw new Error('Recovered turns may only deliver persisted output.');
         if (prepared.uploads.fileAttachments.length && !await authorized(signal)) throw new Error('Conversation access denied.');
         const response = await this.engine.sendMessage(session, prepared.prompt, prepared.uploads.fileAttachments.length ? prepared.uploads.fileAttachments : undefined, {
-          transportContext: { platform: 'slack', history: true, attachments: true, classification: prepared.classification }, signal, onProgress,
+          transportContext: { platform: 'slack', history: true, attachments: true, ...(this.schedules ? { schedules: true } : {}), classification: prepared.classification }, signal, onProgress,
           onSessionRecovery: () => {
             signal.throwIfAborted();
             prepared.next.represented = [input.sourceMessageId!];
@@ -405,6 +422,7 @@ export async function startSlack(signal?: AbortSignal): Promise<{ stop(): Promis
   const journal = new FileTurnJournal(join(directory, 'slack-turns'));
   let service: ConversationService | undefined;
   let engine: TextEngine | undefined;
+  let scheduler: Scheduler | undefined;
   let stopped = false, socket: WebSocket | undefined, retry: ReturnType<typeof setTimeout> | undefined;
   let connecting = false;
   let stopping: Promise<void> | undefined;
@@ -416,8 +434,9 @@ export async function startSlack(signal?: AbortSignal): Promise<{ stop(): Promis
       try {
         socket?.close();
       } finally {
-        try { if (service) await service.shutdown(); else journal.close(); }
-        finally { await engine?.shutdown(); }
+        try { await scheduler?.stop(); }
+        finally { try { if (service) await service.shutdown(); else journal.close(); }
+          finally { await engine?.shutdown(); } }
       }
     });
     return stopping;
@@ -426,8 +445,24 @@ export async function startSlack(signal?: AbortSignal): Promise<{ stop(): Promis
     service = new ConversationService(journal);
     engine = await createTextEngine(process.env.PROVIDER || 'copilot', join(directory, 'slack-provider-state'));
     signal?.throwIfAborted();
+    const schedulesEnabled = (process.env.SCHEDULES_ENABLED?.trim() || 'false').toLowerCase();
+    if (!['true', 'false'].includes(schedulesEnabled)) throw new Error('SCHEDULES_ENABLED must be true or false.');
+    const installationId = process.env.SLACK_INSTALLATION_ID || 'default';
+    let scheduleFrontend: SlackScheduleFrontend | undefined;
+    if (schedulesEnabled === 'true') {
+      const access = createAccessPolicy(process.env);
+      const store = new ScheduleStore(process.env.SCHEDULE_DB_PATH || join(directory, 'schedules.sqlite'));
+      const scheduleAdapter = new SlackScheduleAdapter(api, historyApi, access, engine,
+        { teamId, installationId, botUserId: auth.user_id, channels, users });
+      scheduler = new Scheduler(store, access, scheduleAdapter);
+      const provider = normalizeProviderName(process.env.SCHEDULE_DEFAULT_PROVIDER || process.env.PROVIDER) as ProviderName;
+      if (!PROVIDERS.includes(provider)) throw new Error('SCHEDULE_DEFAULT_PROVIDER is invalid.');
+      scheduleFrontend = new SlackScheduleFrontend(new ScheduleService(scheduler), api, { timezone: process.env.SCHEDULE_DEFAULT_TIMEZONE || 'UTC',
+        provider, model: process.env.SCHEDULE_DEFAULT_MODEL, reasoning: process.env.SCHEDULE_DEFAULT_REASONING });
+      scheduler.start();
+    }
     const adapter = new SlackAdapter({ teamId, installationId: process.env.SLACK_INSTALLATION_ID || 'default', botUserId: auth.user_id,
-      channels, users, excludedAuthors: new Set((process.env.SLACK_EXCLUDED_CONTEXT_USERS ?? '').split(',').filter(Boolean)), stateDirectory: join(directory, 'slack-context') }, api, historyApi, engine, service);
+      channels, users, excludedAuthors: new Set((process.env.SLACK_EXCLUDED_CONTEXT_USERS ?? '').split(',').filter(Boolean)), stateDirectory: join(directory, 'slack-context') }, api, historyApi, engine, service, 1000, scheduleFrontend);
     const reconnect = () => { if (!stopped && !signal?.aborted && !retry) retry = setTimeout(() => { retry = undefined; void connect(); }, 5000); };
     async function connect(): Promise<void> {
       if (stopped || connecting || signal?.aborted) return;

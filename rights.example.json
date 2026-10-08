@@ -14,6 +14,12 @@
       "roleId": "444444444444444444",
       "roles": ["server-admin"],
       "capabilities": ["ask.use"]
+    },
+    {
+      "platform": "slack",
+      "tenantId": "T0123456789",
+      "userId": "U0123456789",
+      "capabilities": ["schedule.message.create", "schedule.ai.create", "schedule.manage.own"]
     }
   ]
 }
