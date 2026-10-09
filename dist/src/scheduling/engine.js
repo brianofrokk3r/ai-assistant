@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { RunTimeoutError } from "../providers/types.js";
 import { validateSchedule, nextOccurrences, scheduleHasStarted } from "./cron.js";
-import { SchedulerLeaseHeldError } from "./store.js";
+import { SCHEDULE_ENDED_PAUSE_REASON, SchedulerLeaseHeldError } from "./store.js";
 import { schedulePlatform } from "./types.js";
 import { retainVerifiedLookups } from "./lookups.js";
 export function scheduleLimits(env = process.env) {
@@ -146,6 +146,8 @@ export class Scheduler {
     async edit(subject, id, patch) {
         this.assertAvailable();
         const before = this.requireTask(subject, id);
+        const reviveExpired = !before.enabled && before.pauseReason === SCHEDULE_ENDED_PAUSE_REASON
+            && Object.prototype.hasOwnProperty.call(patch, "endAt");
         this.requireCreate(subject, before);
         const task = { ...before, ...patch, revision: before.revision + 1 };
         this.validate(task);
@@ -162,6 +164,10 @@ export class Scheduler {
             task.enabled = false;
             task.pauseReason = ended.pauseReason;
             task.revision = ended.revision + 1;
+        }
+        if (reviveExpired) {
+            task.enabled = true;
+            task.pauseReason = undefined;
         }
         task.lastStartedAt = latest.lastStartedAt;
         task.lastVerifiedLookups = task.content === before.content ? latest.lastVerifiedLookups : undefined;
@@ -294,11 +300,16 @@ export class Scheduler {
     }
     current(task) {
         this.store.assertLease(this.now());
-        this.assertWithinDates(task);
         const latest = this.store.get(task.id);
+        const endedAfterClaim = latest?.enabled === false
+            && latest.pauseReason === SCHEDULE_ENDED_PAUSE_REASON
+            && latest.revision === task.revision + 1
+            && latest.lastStartedAt === task.lastStartedAt
+            && latest.endAt === task.endAt;
         // stop() rejects new work but drains claimed runs while retaining the lease.
-        if (!latest?.enabled || latest.revision !== task.revision)
+        if (!latest || ((!latest.enabled || latest.revision !== task.revision) && !endedAfterClaim)) {
             throw new ScheduleAccessError("Task was paused, edited, or deleted.");
+        }
     }
     async execute(task, run) {
         try {

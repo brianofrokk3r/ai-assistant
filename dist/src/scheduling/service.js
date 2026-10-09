@@ -37,13 +37,13 @@ export class ScheduleService {
             throw new Error("Schedule proposal not found for this actor and conversation.");
         if (proposal.expires < this.now())
             throw new Error("Schedule proposal expired; create a new proposal.");
+        const data = JSON.parse(proposal.data);
         if (proposal.consumedResult) {
             const existing = this.scheduler.store.get(proposal.consumedResult);
             if (!existing)
                 throw new Error("The confirmed schedule no longer exists.");
-            return { task: existing, duplicate: true };
+            return { task: existing, duplicate: true, action: data.action };
         }
-        const data = JSON.parse(proposal.data);
         const payload = data.action === "create" ? data.input : data;
         if (stableHash(payload) !== proposal.payloadHash)
             throw new Error("Schedule proposal failed its integrity check.");
@@ -54,12 +54,12 @@ export class ScheduleService {
             const task = await this.scheduler.edit(subject(actor), data.scheduleId, data.patch);
             if (!this.scheduler.store.consumeProposal(proposalId, task.id))
                 throw new Error("Schedule proposal was already consumed.");
-            return { task, duplicate: false };
+            return { task, duplicate: false, action: "edit" };
         }
         // Re-run every validation and live authorization check at confirmation.
         const task = await this.scheduler.prepareCreate(subject(actor), data.input, data.taskId);
         const committed = this.scheduler.commitPrepared(task, proposalId);
-        return { task: committed, duplicate: committed.id !== task.id };
+        return { task: committed, duplicate: committed.id !== task.id, action: "create" };
     }
     cancelProposal(actor, conversation, proposalId) {
         const proposal = this.scheduler.store.getProposal(proposalId);
