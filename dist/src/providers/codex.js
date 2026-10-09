@@ -12,6 +12,7 @@ import { codexHandoffOptions, summarizeHandoff, withHandoff } from "./codexHando
 import { captureAgentArtifacts, withArtifactOutputPrompt } from "../common/agentResponse.js";
 import { ArtifactToolSessions, artifactInputPrompt } from "../common/artifactToolBridge.js";
 import { RulesetToolSessions, rulesetToolPrompt } from "../common/rulesetToolBridge.js";
+import { ScheduleToolSessions, scheduleToolPrompt } from "../common/scheduleToolBridge.js";
 import { GitHubContributionSessions, githubContributionPrompt } from "../common/githubContributionToolBridge.js";
 import { codexHostMcpOverride, codexHostMcpOverrides } from "../common/hostMcpConfig.js";
 import { UserVisibleError } from "../common/userVisibleError.js";
@@ -115,7 +116,7 @@ export function codexShellEnvironment(workingDirectory, childEnvironment) {
     return result;
 }
 /** Host-owned settings that Discord prompts and project config cannot relax. */
-export function codexClientOptions(temporaryDirectory, artifacts, rulesets, systemPrompt = secureSystemPrompt(providerSystemPrompt()), github, sitesEnabled = configuredSitesEnabled(), textTransport = false) {
+export function codexClientOptions(temporaryDirectory, artifacts, rulesets, systemPrompt = secureSystemPrompt(providerSystemPrompt()), github, sitesEnabled = configuredSitesEnabled(), textTransport = false, schedules) {
     if (configuredSecurityMode() === "unrestricted") {
         return {
             ...(process.env.CODEX_EXECUTABLE_PATH?.trim()
@@ -124,7 +125,7 @@ export function codexClientOptions(temporaryDirectory, artifacts, rulesets, syst
             ...(process.env.OPENAI_API_KEY ? { apiKey: process.env.OPENAI_API_KEY } : {}),
             ...(process.env.OPENAI_BASE_URL ? { baseUrl: process.env.OPENAI_BASE_URL } : {}),
             config: { developer_instructions: systemPrompt, ...(textTransport ? { apps: { [CODEX_SITES_CONNECTOR_ID]: { enabled: false } }, features: { plugins: false } } : {}) },
-            ...(artifacts || rulesets || github ? { configOverrides: codexHostMcpOverrides(artifacts, rulesets, false, github) } : {}),
+            ...(artifacts || rulesets || github || schedules ? { configOverrides: codexHostMcpOverrides(artifacts, rulesets, false, github, schedules) } : {}),
         };
     }
     if (!temporaryDirectory) {
@@ -191,7 +192,7 @@ export function codexClientOptions(temporaryDirectory, artifacts, rulesets, syst
             },
         },
         configOverrides: [
-            codexHostMcpOverride(artifacts, rulesets, github),
+            codexHostMcpOverride(artifacts, rulesets, github, schedules),
             codexFilesystemPermissionOverride(sitesEnabled),
             codexNetworkPermissionOverride(sitesEnabled),
         ],
@@ -358,6 +359,7 @@ export class CodexProvider {
     participationProcesses = new ParticipationProcessRunner();
     artifactTools = new ArtifactToolSessions();
     rulesetTools = new RulesetToolSessions();
+    scheduleTools = new ScheduleToolSessions();
     name = "codex";
     displayName = "OpenAI Codex";
     clients = new Map();
@@ -381,9 +383,9 @@ export class CodexProvider {
     modelOverrides = new Map();
     reasoningEffortOverrides = new Map();
     mcpToolOverrides = new Map();
-    clientFor(key, context, artifacts, rulesets, github) {
+    clientFor(key, context, artifacts, rulesets, github, schedules) {
         // Connection bindings are private and transient: rebuild the client without rotating history.
-        const fingerprint = contextFingerprint({ context: context.fingerprint, artifacts, rulesets, github });
+        const fingerprint = contextFingerprint({ context: context.fingerprint, artifacts, rulesets, github, schedules });
         const existing = this.clients.get(key);
         if (existing?.fingerprint === fingerprint)
             return existing.client;
@@ -392,7 +394,7 @@ export class CodexProvider {
             temporaryDirectory = createCodexSessionTemporaryDirectory();
             this.temporaryDirectories.set(key, temporaryDirectory);
         }
-        const client = this.makeClient(codexClientOptions(temporaryDirectory, artifacts, rulesets, context.systemPrompt, github, context.sitesEnabled, Boolean(context.transportContext)));
+        const client = this.makeClient(codexClientOptions(temporaryDirectory, artifacts, rulesets, context.systemPrompt, github, context.sitesEnabled, Boolean(context.transportContext), schedules));
         this.clients.set(key, { fingerprint, client });
         this.sessions.delete(key);
         return client;
@@ -418,7 +420,8 @@ export class CodexProvider {
         const previousClient = this.clients.get(key)?.client;
         const rulesets = context.rulesetsEnabled ? await this.rulesetTools.config(key) : undefined;
         const github = context.githubContributionsEnabled ? await this.githubTools.config(key) : undefined;
-        const client = this.clientFor(key, context, await this.artifactTools.config(key, context.transportContext), rulesets, github);
+        const schedules = context.schedulesEnabled ? await this.scheduleTools.config(key) : undefined;
+        const client = this.clientFor(key, context, await this.artifactTools.config(key, context.transportContext), rulesets, github, schedules);
         const existing = this.sessions.get(key);
         if (!forceNew && existing && sameContext(this.sessionContexts.get(key)?.applied, context.applied)
             && previousClient === client)
@@ -513,7 +516,8 @@ export class CodexProvider {
             const runWithRulesetTools = (action) => context.rulesetsEnabled
                 ? this.rulesetTools.run(userId, options, (rulesetRuntime) => action(rulesetRuntime))
                 : action();
-            const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (runtime, staged) => {
+            const runWithScheduleTools = (action) => context.schedulesEnabled ? this.scheduleTools.run(userId, options, action) : action();
+            const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => runWithScheduleTools(async (scheduleRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (runtime, staged) => {
                 runtime.providerSourceRoot = () => generatedImageThreadDirectory(this.sessions.get(userId)?.id ?? null);
                 const images = staged.filter((attachment) => attachment.kind !== "file");
                 const inputFor = (handoff, recovered = false) => {
@@ -521,7 +525,8 @@ export class CodexProvider {
                     const turnPrompt = recoveryPrompt === undefined ? resolvedPrompt
                         : fileContext.length ? `${recoveryPrompt}\n\n${fileContext.join("\n\n")}` : recoveryPrompt;
                     const basePrompt = withArtifactOutputPrompt(artifactInputPrompt(withContextTurn(turnPrompt, { userInstructionContext: options?.userInstructionContext }), staged), artifactRun, options?.transportContext);
-                    const artifactPrompt = githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(basePrompt, rulesetRuntime) : basePrompt, githubRun);
+                    const scheduledPrompt = scheduleToolPrompt(basePrompt, scheduleRuntime);
+                    const artifactPrompt = githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(scheduledPrompt, rulesetRuntime) : scheduledPrompt, githubRun);
                     return images.length > 0
                         ? [
                             { type: "text", text: withHandoff(artifactPrompt, handoff) },
@@ -611,7 +616,7 @@ export class CodexProvider {
                         displayName: `generated-image-${index + 1}${path.extname(savedPath)}`,
                     })),
                 };
-            }), Boolean(options?.transportContext?.attachments))));
+            }), Boolean(options?.transportContext?.attachments)))));
             this.appendHistory(userId, { type: "assistant.message", data: { content: response.content } });
             return response;
         });
@@ -809,6 +814,7 @@ export class CodexProvider {
     async resetSession(key) {
         await this.artifactTools.reset(key);
         await this.rulesetTools.reset(key);
+        await this.scheduleTools.reset(key);
         await this.githubTools.reset(key);
         this.sessions.delete(key);
         this.sessionOperationQueues.delete(key);
@@ -853,6 +859,7 @@ export class CodexProvider {
         await this.participationProcesses.shutdown();
         await this.artifactTools.shutdown();
         await this.rulesetTools.shutdown();
+        await this.scheduleTools.shutdown();
         await this.githubTools.shutdown();
         this.sessions.clear();
         this.clients.clear();

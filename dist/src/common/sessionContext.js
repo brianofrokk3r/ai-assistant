@@ -5,6 +5,8 @@ import { ARTIFACT_INSTRUCTIONS } from "./agentResponse.js";
 import { ARTIFACT_TOOLS } from "./artifactToolDefinitions.js";
 import { RULESET_TOOLS } from "./rulesetToolDefinitions.js";
 import { RULESET_INSTRUCTIONS } from "./rulesetToolBridge.js";
+import { SCHEDULE_TOOLS } from "./scheduleToolDefinitions.js";
+import { SCHEDULE_INSTRUCTIONS } from "./scheduleToolBridge.js";
 import { githubContributionsEnabled, githubContributionAccess, contributionReviewsEnabled } from "./githubContributionConfig.js";
 import { codexReviewInstructions, githubContributionInstructions, githubContributionCallLimits, githubContributionTools } from "./githubContributionToolDefinitions.js";
 import { githubContributionLimits } from "./githubContributionLimits.js";
@@ -53,6 +55,11 @@ export const CONTEXT_CONTRIBUTORS = [
                     ? { ...request.userInstructionContext, userDisplayName: undefined } : undefined)].filter(Boolean).join("\n\n"),
             capabilities: RULESET_TOOLS,
         } : undefined,
+    },
+    {
+        id: "schedules",
+        profiles: ["conversation"],
+        resolve: request => request.transportContext?.schedules ? { instructions: SCHEDULE_INSTRUCTIONS, capabilities: SCHEDULE_TOOLS } : undefined,
     },
     {
         id: "github-contributions",
@@ -124,6 +131,7 @@ export function resolveSessionContext(request = {}, contributors = CONTEXT_CONTR
         fingerprint: contextFingerprint(applied),
         transportContext: request.transportContext,
         rulesetsEnabled: resolved.some(part => part.id === "user-rulesets"),
+        schedulesEnabled: resolved.some(part => part.id === "schedules"),
         githubContributionsEnabled: resolved.some(part => part.id === "github-contributions"),
         sitesEnabled: !request.transportContext && configuredSitesEnabled(),
     };

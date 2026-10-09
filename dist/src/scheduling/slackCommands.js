@@ -11,34 +11,6 @@ function options(items) {
     }
     return result;
 }
-const weekdays = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
-function recurrence(text) {
-    const explicit = text.match(/(?:cron\s*[:=]\s*)["']?([^"']+?)["']?(?:\s+(?:in|timezone\s*[:=])\s*([A-Za-z_]+\/[A-Za-z_+-]+|UTC))?(?:\s|$)/i);
-    if (explicit && explicit[1].trim().split(/\s+/).length === 5)
-        return { cron: explicit[1].trim(), timezone: explicit[2] };
-    const at = text.match(/every\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-    if (at) {
-        let hour = Number(at[2]) % 12;
-        if (at[4]?.toLowerCase() === "pm")
-            hour += 12;
-        return { cron: `${Number(at[3] ?? 0)} ${hour} * * ${weekdays[at[1].toLowerCase()]}` };
-    }
-    const weekdaysAt = text.match(/every\s+weekday(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
-    if (weekdaysAt) {
-        let hour = Number(weekdaysAt[1] ?? 9) % 12;
-        if (weekdaysAt[3]?.toLowerCase() === "pm")
-            hour += 12;
-        return { cron: `${Number(weekdaysAt[2] ?? 0)} ${hour} * * 1-5` };
-    }
-    const daily = text.match(/every\s+day(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?/i);
-    if (daily) {
-        let hour = Number(daily[1] ?? 9) % 12;
-        if (daily[3]?.toLowerCase() === "pm")
-            hour += 12;
-        return { cron: `${Number(daily[2] ?? 0)} ${hour} * * *` };
-    }
-    return;
-}
 export class SlackScheduleFrontend {
     service;
     api;
@@ -47,6 +19,9 @@ export class SlackScheduleFrontend {
         this.service = service;
         this.api = api;
         this.defaults = defaults;
+    }
+    toolContext(input) {
+        return { service: this.service, actor: input.actor, conversation: input.conversation, defaults: this.defaults };
     }
     async reply(input, text) {
         await this.api.call("chat.postMessage", { channel: input.conversation.channelId, ...(input.conversation.threadId ? { thread_ts: input.conversation.threadId } : {}), text, parse: "none", unfurl_links: "false", unfurl_media: "false" });
@@ -77,10 +52,6 @@ export class SlackScheduleFrontend {
         }
         if (/^schedule\s+(?:create|list|inspect|edit|pause|resume|delete|run-now|retry-delivery)\b/i.test(text)) {
             await this.command(input, text);
-            return true;
-        }
-        if (/\b(schedule|remind|post)\b/i.test(text) && /\bevery\b/i.test(text)) {
-            await this.natural(input, text);
             return true;
         }
         return false;
@@ -175,25 +146,6 @@ export class SlackScheduleFrontend {
         }
         catch (error) {
             await this.reply(input, error instanceof Error ? error.message : "Schedule operation failed.");
-        }
-    }
-    async natural(input, text) {
-        try {
-            if (/first business day/i.test(text))
-                throw new Error("The first business day cannot be represented safely by five-field cron. Please provide a supported cadence.");
-            const cadence = recurrence(text);
-            if (!cadence)
-                throw new Error("I could not safely resolve that recurrence. Include a phrase such as ‘every Monday at 9 AM’ or provide a five-field cron expression.");
-            if (/latest\s+(?:news|updates)/i.test(text) && !/latest\s+(?:news|updates)\s+(?:about|on|for)\s+\S+/i.test(text))
-                throw new Error("What topic or scope should the latest-news schedule cover?");
-            const ai = /\b(search|summari[sz]e|research|latest|ai\s+action)\b/i.test(text);
-            if (ai && !this.defaults.model)
-                throw new Error("AI scheduling needs SCHEDULE_DEFAULT_MODEL or an explicit --model in the deterministic command.");
-            const proposal = await this.service.proposeCreate(input.actor, input.conversation, this.createInput(input, ai ? "ai" : "message", text, cadence.cron, cadence.timezone, {}));
-            await this.reply(input, `${proposal.summary}\n\nConfirm within 10 minutes with: confirm ${proposal.id}`);
-        }
-        catch (error) {
-            await this.reply(input, error instanceof Error ? error.message : "Could not interpret the schedule request.");
         }
     }
     createInput(input, kind, content, cron, timezone, opts = {}) {

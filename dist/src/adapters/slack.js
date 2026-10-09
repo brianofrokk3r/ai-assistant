@@ -410,6 +410,7 @@ export class SlackAdapter {
                     throw new Error('Conversation access denied.');
                 const response = await this.engine.sendMessage(session, prepared.prompt, prepared.uploads.fileAttachments.length ? prepared.uploads.fileAttachments : undefined, {
                     transportContext: { platform: 'slack', history: true, attachments: true, ...(this.schedules ? { schedules: true } : {}), classification: prepared.classification }, signal, onProgress,
+                    ...(this.schedules ? { scheduleContext: this.schedules.toolContext(input) } : {}),
                     onSessionRecovery: () => {
                         signal.throwIfAborted();
                         prepared.next.represented = [input.sourceMessageId];

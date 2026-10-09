@@ -2,6 +2,7 @@ import type { LookupRecord } from "../utils/fetchWebpage.js";
 import type { ContextProfile, TransportContext } from "../common/sessionContext.js";
 import type { AccessPolicy, AccessSubject } from "../common/accessPolicy.js";
 import type { UserInstructionContext } from "../utils/userInstructions.js";
+import type { ScheduleToolContext } from "../common/scheduleTools.js";
 
 export const PROVIDERS = ["copilot", "codex", "opencode"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
@@ -112,6 +113,8 @@ export interface SendMessageOptions {
     access: AccessPolicy;
     guildId?: string | null;
   };
+  /** Host-bound schedule service, requester, destination, and trusted defaults. Never model-supplied. */
+  scheduleContext?: ScheduleToolContext;
   /** Active Discord speaker whose admin-configured rulesets should affect this turn. */
   userInstructionContext?: UserInstructionContext;
 }

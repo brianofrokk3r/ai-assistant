@@ -10,6 +10,8 @@ import { captureAgentArtifacts, withArtifactOutputPrompt } from "../common/agent
 import { ArtifactToolSessions, artifactInputPrompt, type ArtifactMcpConfig } from "../common/artifactToolBridge.js";
 import { RulesetToolSessions, rulesetToolPrompt, type RulesetMcpConfig } from "../common/rulesetToolBridge.js";
 import type { RulesetTools } from "../common/rulesetTools.js";
+import { ScheduleToolSessions, scheduleToolPrompt, type ScheduleMcpConfig } from "../common/scheduleToolBridge.js";
+import type { ScheduleTools } from "../common/scheduleTools.js";
 import { GitHubContributionSessions, githubContributionPrompt, type GitHubContributionMcpConfig } from "../common/githubContributionToolBridge.js";
 import { configuredMilliseconds, providerTimeout, startProgressUpdates } from "../common/runLifecycle.js";
 import {
@@ -119,9 +121,10 @@ export function openCodeChildEnvironment(
   systemPrompt?: string,
   agentName?: string,
   github?: GitHubContributionMcpConfig,
+  schedules?: ScheduleMcpConfig,
 ): Record<string, string> {
   const environment = providerChildEnvironment("opencode", source);
-  if (artifacts || rulesets || github || systemPrompt) {
+  if (artifacts || rulesets || github || schedules || systemPrompt) {
     const config = configuredSecurityMode(source) === "shared" ? openCodeSecurityConfig()
       : JSON.parse(environment.OPENCODE_CONFIG_CONTENT || "{}");
     if (systemPrompt) {
@@ -149,6 +152,10 @@ export function openCodeChildEnvironment(
         type: "local", command: [rulesets.command, ...rulesets.args], environment: rulesets.env, enabled: true, timeout: 120_000,
       };
       config.permission["ruleset_tools_*"] = "allow";
+    }
+    if (schedules) {
+      config.mcp.schedule_tools = { type: "local", command: [schedules.command, ...schedules.args], environment: schedules.env, enabled: true, timeout: 120_000 };
+      config.permission["schedule_tools_*"] = "allow";
     }
     return { ...environment, OPENCODE_DISABLE_AUTOUPDATE: "1",
       ...(configuredSecurityMode(source) === "shared" ? { OPENCODE_DISABLE_PROJECT_CONFIG: "1" } : {}),
@@ -201,7 +208,7 @@ export function selectOpenCodeParticipationModel(models: string[], current?: str
  */
 function runOpenCode(
   args: string[],
-  opts: { signal?: AbortSignal; cwd?: string; timeoutMs: number; providerName?: string; artifacts?: ArtifactMcpConfig; rulesets?: RulesetMcpConfig; github?: GitHubContributionMcpConfig; systemPrompt?: string; agentName?: string }
+  opts: { signal?: AbortSignal; cwd?: string; timeoutMs: number; providerName?: string; artifacts?: ArtifactMcpConfig; rulesets?: RulesetMcpConfig; github?: GitHubContributionMcpConfig; schedules?: ScheduleMcpConfig; systemPrompt?: string; agentName?: string }
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const cancellationGraceMs = configuredMilliseconds("AI_CANCELLATION_GRACE_MS", 5_000);
@@ -210,7 +217,7 @@ function runOpenCode(
       signal: opts.signal,
       killSignal: "SIGKILL",
       stdio: ["ignore", "pipe", "pipe"],
-      env: openCodeChildEnvironment(process.env, opts.artifacts, opts.rulesets, opts.systemPrompt, opts.agentName, opts.github),
+      env: openCodeChildEnvironment(process.env, opts.artifacts, opts.rulesets, opts.systemPrompt, opts.agentName, opts.github, opts.schedules),
     });
 
     let stdout = "";
@@ -301,6 +308,7 @@ export class OpenCodeProvider implements Provider {
   private readonly participationProcesses = new ParticipationProcessRunner();
   private artifactTools = new ArtifactToolSessions();
   private rulesetTools = new RulesetToolSessions();
+  private scheduleTools = new ScheduleToolSessions();
   private githubTools = new GitHubContributionSessions();
   readonly name = "opencode" as const;
   readonly displayName = "OpenCode";
@@ -346,10 +354,13 @@ export class OpenCodeProvider implements Provider {
         context.rulesetsEnabled
           ? this.rulesetTools.run(userId, options, (rulesetRuntime) => action(rulesetRuntime))
           : action();
-      const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (_runtime, staged) => {
+      const runWithScheduleTools = <T>(action: (scheduleRuntime?: ScheduleTools) => Promise<T>) =>
+        context.schedulesEnabled ? this.scheduleTools.run(userId, options, action) : action();
+      const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => runWithScheduleTools(async (scheduleRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (_runtime, staged) => {
         for (const file of staged.filter((file) => !file.binary)) args.push("--file", file.path);
         const basePrompt = withArtifactOutputPrompt(artifactInputPrompt(withContextTurn(prompt, { userInstructionContext: options?.userInstructionContext }), staged), artifactRun, options?.transportContext);
-        args.push(githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(basePrompt, rulesetRuntime) : basePrompt, githubRun));
+        const scheduledPrompt = scheduleToolPrompt(basePrompt, scheduleRuntime);
+        args.push(githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(scheduledPrompt, rulesetRuntime) : scheduledPrompt, githubRun));
         const stopProgress = startProgressUpdates(options);
         const { stdout, stderr, code } = await runOpenCode(args, {
           cwd: workingDirectory,
@@ -359,6 +370,7 @@ export class OpenCodeProvider implements Provider {
           artifacts: await this.artifactTools.config(userId, options?.transportContext),
           rulesets: context.rulesetsEnabled ? await this.rulesetTools.config(userId) : undefined,
           github: context.githubContributionsEnabled ? await this.githubTools.config(userId) : undefined,
+          schedules: context.schedulesEnabled ? await this.scheduleTools.config(userId) : undefined,
           systemPrompt,
           agentName,
         }).finally(stopProgress);
@@ -375,7 +387,7 @@ export class OpenCodeProvider implements Provider {
           this.store.set(userId, newSessionId, context.applied);
         }
         return finalTextFromEvents(events) || (options?.transportContext?.attachments ? "" : "(no response)");
-      }), Boolean(options?.transportContext?.attachments))));
+      }), Boolean(options?.transportContext?.attachments)))));
       this.appendHistory(userId, { type: "assistant.message", data: { content: response.content } });
       return response;
     });
@@ -580,6 +592,7 @@ export class OpenCodeProvider implements Provider {
   async resetSession(key: string): Promise<void> {
     await this.artifactTools.reset(key);
     await this.rulesetTools.reset(key);
+    await this.scheduleTools.reset(key);
     await this.githubTools.reset(key);
     const sessionId = this.sessions.get(key) ?? this.store.get(key);
     this.sessions.delete(key);
@@ -620,6 +633,7 @@ export class OpenCodeProvider implements Provider {
     await this.participationProcesses.shutdown();
     await this.artifactTools.shutdown();
     await this.rulesetTools.shutdown();
+    await this.scheduleTools.shutdown();
     await this.githubTools.shutdown();
     this.sessions.clear();
     this.messageQueues.clear();

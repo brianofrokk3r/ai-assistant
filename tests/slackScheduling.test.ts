@@ -13,6 +13,8 @@ import { ScheduleStore, SchedulerLeaseHeldError } from "../src/scheduling/store.
 import { ScheduleService } from "../src/scheduling/service.js";
 import { SlackScheduleAdapter } from "../src/scheduling/slackAdapter.js";
 import { SlackScheduleFrontend } from "../src/scheduling/slackCommands.js";
+import { createScheduleToolRun, ScheduleTools } from "../src/common/scheduleTools.js";
+import { resolveSessionContext } from "../src/common/sessionContext.js";
 
 const now = Date.UTC(2026, 9, 8, 12);
 const input: IncomingTurn = { eventId: "event", sourceMessageId: "1700000000.000001", receivedAt: new Date(now).toISOString(), text: "",
@@ -57,16 +59,28 @@ test("Slack proposals bind actor and conversation and duplicate confirmation is 
   assert.equal(first.task.id, second.task.id); assert.equal(second.duplicate, true); assert.equal(f.store.list("T", "slack").length, 1);
 });
 
-test("Slack frontend proposes natural schedules, requires confirmation, and can run saved output", async t => {
+test("agent schedule tools propose a host-bound schedule, require confirmation, and can run saved output", async t => {
   const f = fixture(t); const frontend = new SlackScheduleFrontend(f.service, f.api, { timezone: "America/New_York", provider: "codex", model: "test" });
   const turn = { ...input, text: "Schedule every Monday at 9 AM to search latest news about AI safety" };
-  assert.equal(await frontend.handle(turn), true);
-  const response = f.calls.filter(call => call.method === "chat.postMessage").at(-1)?.args?.text ?? "";
-  const proposalId = response.match(/proposal_[a-f0-9]+/)?.[0]; assert.ok(proposalId, response); assert.equal(f.store.list(undefined, "slack").length, 0);
+  const run = createScheduleToolRun(), tools = new ScheduleTools(run, frontend.toolContext(turn));
+  await assert.rejects(tools.call("create_schedule", { run_id: run.id, kind: "ai", content: "x", cron: "0 9 * * 1", user_id: "ATTACKER" }), /Invalid schedule tool arguments/);
+  const proposed = await tools.call("create_schedule", { run_id: run.id, kind: "ai", content: "Search the internet for the latest news about AI safety and summarize it.", cron: "0 9 * * 1", timezone: "America/New_York", context_messages: "5" }) as { proposal_id: string };
+  const proposalId = proposed.proposal_id; assert.match(proposalId, /^proposal_[a-f0-9]+$/); assert.equal(f.store.list(undefined, "slack").length, 0);
   await frontend.handle({ ...turn, text: `confirm ${proposalId}` });
   const task = f.store.list("T", "slack")[0]; assert.equal(task.destination?.threadId, input.conversation.threadId);
   await f.service.runNow(input.actor, task.id); await f.scheduler.idle();
   assert.match(f.generated[0], /untrusted context/); assert.equal(f.store.runs(task.id)[0].state, "succeeded");
+});
+
+test("free-form scheduling reaches the agent and schedule context teaches tool-based interpretation", async t => {
+  const f = fixture(t); const frontend = new SlackScheduleFrontend(f.service, f.api, { timezone: "UTC", provider: "codex", model: "test" });
+  const text = "Every Monday, at 9AM EST, search the internet for relevant news to the keyword ai-assistant and then create a marketing article";
+  assert.equal(await frontend.handle({ ...input, text }), false);
+  const context = resolveSessionContext({ transportContext: { platform: "slack", history: true, attachments: true, schedules: true } });
+  assert.equal(context.schedulesEnabled, true);
+  assert.match(context.systemPrompt, /Use them whenever the user asks to create/);
+  assert.match(context.systemPrompt, /EST\/EDT or ET means America\/New_York/);
+  assert.doesNotMatch(context.systemPrompt, /could not safely resolve/i);
 });
 
 test("Slack delivery classifies definite and ambiguous failures and re-fences rate-limit retry", async t => {

@@ -13,6 +13,8 @@ import { captureAgentArtifacts, withArtifactOutputPrompt } from "../common/agent
 import { ArtifactToolSessions, artifactInputPrompt, type ArtifactMcpConfig } from "../common/artifactToolBridge.js";
 import { RulesetToolSessions, rulesetToolPrompt, type RulesetMcpConfig } from "../common/rulesetToolBridge.js";
 import type { RulesetTools } from "../common/rulesetTools.js";
+import { ScheduleToolSessions, scheduleToolPrompt, type ScheduleMcpConfig } from "../common/scheduleToolBridge.js";
+import type { ScheduleTools } from "../common/scheduleTools.js";
 import { GitHubContributionSessions, githubContributionPrompt, type GitHubContributionMcpConfig } from "../common/githubContributionToolBridge.js";
 import { codexHostMcpOverride, codexHostMcpOverrides } from "../common/hostMcpConfig.js";
 import { UserVisibleError } from "../common/userVisibleError.js";
@@ -161,7 +163,7 @@ export function codexShellEnvironment(
 }
 
 /** Host-owned settings that Discord prompts and project config cannot relax. */
-export function codexClientOptions(temporaryDirectory?: string, artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, systemPrompt = secureSystemPrompt(providerSystemPrompt()), github?: GitHubContributionMcpConfig, sitesEnabled = configuredSitesEnabled(), textTransport = false): CodexOptions {
+export function codexClientOptions(temporaryDirectory?: string, artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, systemPrompt = secureSystemPrompt(providerSystemPrompt()), github?: GitHubContributionMcpConfig, sitesEnabled = configuredSitesEnabled(), textTransport = false, schedules?: ScheduleMcpConfig): CodexOptions {
   if (configuredSecurityMode() === "unrestricted") {
     return {
       ...(process.env.CODEX_EXECUTABLE_PATH?.trim()
@@ -170,7 +172,7 @@ export function codexClientOptions(temporaryDirectory?: string, artifacts?: Arti
       ...(process.env.OPENAI_API_KEY ? { apiKey: process.env.OPENAI_API_KEY } : {}),
       ...(process.env.OPENAI_BASE_URL ? { baseUrl: process.env.OPENAI_BASE_URL } : {}),
       config: { developer_instructions: systemPrompt, ...(textTransport ? { apps: { [CODEX_SITES_CONNECTOR_ID]: { enabled: false } }, features: { plugins: false } } : {}) },
-      ...(artifacts || rulesets || github ? { configOverrides: codexHostMcpOverrides(artifacts, rulesets, false, github) } : {}),
+      ...(artifacts || rulesets || github || schedules ? { configOverrides: codexHostMcpOverrides(artifacts, rulesets, false, github, schedules) } : {}),
     };
   }
 
@@ -244,7 +246,7 @@ export function codexClientOptions(temporaryDirectory?: string, artifacts?: Arti
       },
     },
     configOverrides: [
-      codexHostMcpOverride(artifacts, rulesets, github),
+      codexHostMcpOverride(artifacts, rulesets, github, schedules),
       codexFilesystemPermissionOverride(sitesEnabled),
       codexNetworkPermissionOverride(sitesEnabled),
     ],
@@ -441,6 +443,7 @@ export class CodexProvider implements Provider {
   private readonly participationProcesses = new ParticipationProcessRunner();
   private artifactTools = new ArtifactToolSessions();
   private rulesetTools = new RulesetToolSessions();
+  private scheduleTools = new ScheduleToolSessions();
   readonly name = "codex" as const;
   readonly displayName = "OpenAI Codex";
 
@@ -468,9 +471,9 @@ export class CodexProvider implements Provider {
   private reasoningEffortOverrides: Map<string, ReasoningEffort> = new Map();
   private mcpToolOverrides: Map<string, Record<string, string[]>> = new Map();
 
-  private clientFor(key: string, context: SessionContext, artifacts: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, github?: GitHubContributionMcpConfig) {
+  private clientFor(key: string, context: SessionContext, artifacts: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, github?: GitHubContributionMcpConfig, schedules?: ScheduleMcpConfig) {
     // Connection bindings are private and transient: rebuild the client without rotating history.
-    const fingerprint = contextFingerprint({ context: context.fingerprint, artifacts, rulesets, github });
+    const fingerprint = contextFingerprint({ context: context.fingerprint, artifacts, rulesets, github, schedules });
     const existing = this.clients.get(key);
     if (existing?.fingerprint === fingerprint) return existing.client;
     let temporaryDirectory = this.temporaryDirectories.get(key);
@@ -478,7 +481,7 @@ export class CodexProvider implements Provider {
       temporaryDirectory = createCodexSessionTemporaryDirectory();
       this.temporaryDirectories.set(key, temporaryDirectory);
     }
-    const client = this.makeClient(codexClientOptions(temporaryDirectory, artifacts, rulesets, context.systemPrompt, github, context.sitesEnabled, Boolean(context.transportContext)));
+    const client = this.makeClient(codexClientOptions(temporaryDirectory, artifacts, rulesets, context.systemPrompt, github, context.sitesEnabled, Boolean(context.transportContext), schedules));
     this.clients.set(key, { fingerprint, client });
     this.sessions.delete(key);
     return client;
@@ -507,7 +510,8 @@ export class CodexProvider implements Provider {
     const previousClient = this.clients.get(key)?.client;
     const rulesets = context.rulesetsEnabled ? await this.rulesetTools.config(key) : undefined;
     const github = context.githubContributionsEnabled ? await this.githubTools.config(key) : undefined;
-    const client = this.clientFor(key, context, await this.artifactTools.config(key, context.transportContext), rulesets, github);
+    const schedules = context.schedulesEnabled ? await this.scheduleTools.config(key) : undefined;
+    const client = this.clientFor(key, context, await this.artifactTools.config(key, context.transportContext), rulesets, github, schedules);
     const existing = this.sessions.get(key);
     if (!forceNew && existing && sameContext(this.sessionContexts.get(key)?.applied, context.applied)
       && previousClient === client) return existing;
@@ -612,7 +616,9 @@ export class CodexProvider implements Provider {
         context.rulesetsEnabled
           ? this.rulesetTools.run(userId, options, (rulesetRuntime) => action(rulesetRuntime))
           : action();
-      const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (runtime, staged) => {
+      const runWithScheduleTools = <T>(action: (scheduleRuntime?: ScheduleTools) => Promise<T>) =>
+        context.schedulesEnabled ? this.scheduleTools.run(userId, options, action) : action();
+      const response = await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => runWithScheduleTools(async (scheduleRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (runtime, staged) => {
         runtime.providerSourceRoot = () => generatedImageThreadDirectory(this.sessions.get(userId)?.id ?? null);
         const images = staged.filter((attachment) => attachment.kind !== "file");
         const inputFor = (handoff?: string, recovered = false): string | UserInput[] => {
@@ -620,7 +626,8 @@ export class CodexProvider implements Provider {
           const turnPrompt = recoveryPrompt === undefined ? resolvedPrompt
             : fileContext.length ? `${recoveryPrompt}\n\n${fileContext.join("\n\n")}` : recoveryPrompt;
           const basePrompt = withArtifactOutputPrompt(artifactInputPrompt(withContextTurn(turnPrompt, { userInstructionContext: options?.userInstructionContext }), staged), artifactRun, options?.transportContext);
-          const artifactPrompt = githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(basePrompt, rulesetRuntime) : basePrompt, githubRun);
+          const scheduledPrompt = scheduleToolPrompt(basePrompt, scheduleRuntime);
+          const artifactPrompt = githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(scheduledPrompt, rulesetRuntime) : scheduledPrompt, githubRun);
           return images.length > 0
             ? [
                 { type: "text", text: withHandoff(artifactPrompt, handoff) },
@@ -708,7 +715,7 @@ export class CodexProvider implements Provider {
             displayName: `generated-image-${index + 1}${path.extname(savedPath)}`,
           })),
         };
-      }), Boolean(options?.transportContext?.attachments))));
+      }), Boolean(options?.transportContext?.attachments)))));
       this.appendHistory(userId, { type: "assistant.message", data: { content: response.content } });
       return response;
     });
@@ -940,6 +947,7 @@ export class CodexProvider implements Provider {
   async resetSession(key: string): Promise<void> {
     await this.artifactTools.reset(key);
     await this.rulesetTools.reset(key);
+    await this.scheduleTools.reset(key);
     await this.githubTools.reset(key);
     this.sessions.delete(key);
     this.sessionOperationQueues.delete(key);
@@ -986,6 +994,7 @@ export class CodexProvider implements Provider {
     await this.participationProcesses.shutdown();
     await this.artifactTools.shutdown();
     await this.rulesetTools.shutdown();
+    await this.scheduleTools.shutdown();
     await this.githubTools.shutdown();
     this.sessions.clear();
     this.clients.clear();
