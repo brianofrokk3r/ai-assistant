@@ -9,6 +9,8 @@ import { captureAgentArtifacts, withArtifactOutputPrompt } from "../common/agent
 import { ArtifactToolSessions, artifactInputPrompt } from "../common/artifactToolBridge.js";
 import { RulesetToolSessions, rulesetToolPrompt } from "../common/rulesetToolBridge.js";
 import type { RulesetTools } from "../common/rulesetTools.js";
+import { ScheduleToolSessions, scheduleToolPrompt } from "../common/scheduleToolBridge.js";
+import type { ScheduleTools } from "../common/scheduleTools.js";
 import { GitHubContributionSessions, githubContributionPrompt } from "../common/githubContributionToolBridge.js";
 import { githubContributionsEnabled } from "../common/githubContributionConfig.js";
 import { configuredMilliseconds, providerTimeout, startProgressUpdates } from "../common/runLifecycle.js";
@@ -78,7 +80,7 @@ export function createCopilotPermissionHandler(workingDirectory: string): Permis
           ? { kind: "approve-once" }
           : reject("Writes are limited to non-sensitive files in the assigned workspace.");
       case "mcp":
-        return request.serverName === "artifact_tools" || request.serverName === "ruleset_tools"
+        return request.serverName === "artifact_tools" || request.serverName === "ruleset_tools" || request.serverName === "schedule_tools"
           || (request.serverName === "github_contributions" && githubContributionsEnabled()) || request.readOnly
           ? { kind: "approve-once" }
           : reject("Mutating connector and MCP tools are disabled for Discord sessions.");
@@ -220,6 +222,7 @@ async function sendUntilIdle(
 export class CopilotProvider implements Provider {
   private artifactTools = new ArtifactToolSessions();
   private rulesetTools = new RulesetToolSessions();
+  private scheduleTools = new ScheduleToolSessions();
   private githubTools = new GitHubContributionSessions();
   readonly name = "copilot" as const;
   readonly displayName = "GitHub Copilot";
@@ -272,6 +275,9 @@ export class CopilotProvider implements Provider {
     }
     if (context.rulesetsEnabled) {
       mcpServers.ruleset_tools = { ...(await this.rulesetTools.config(key)), type: "local", tools: ["*"], timeout: 120_000 };
+    }
+    if (context.schedulesEnabled) {
+      mcpServers.schedule_tools = { ...(await this.scheduleTools.config(key)), type: "local", tools: ["*"], timeout: 120_000 };
     }
     const fingerprint = contextFingerprint({ context: context.fingerprint, workingDir, mcpServers });
     if (existing && this.sessionConnectionFingerprints.get(key) === fingerprint) return existing;
@@ -440,18 +446,20 @@ export class CopilotProvider implements Provider {
             context.rulesetsEnabled
               ? this.rulesetTools.run(userId, options, (rulesetRuntime) => action(rulesetRuntime))
               : action();
-          return await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (_runtime, staged) => {
+          const runWithScheduleTools = <T>(action: (scheduleRuntime?: ScheduleTools) => Promise<T>) =>
+            context.schedulesEnabled ? this.scheduleTools.run(userId, options, action) : action();
+          return await this.githubTools.run(userId, options, context.githubContributionsEnabled, githubRun => runWithRulesetTools(async (rulesetRuntime) => runWithScheduleTools(async (scheduleRuntime) => captureAgentArtifacts(workingDirectory, (artifactRun) => this.artifactTools.run(userId, artifactRun, imagePaths, options, async (_runtime, staged) => {
             const attachments = staged.filter((file) => !file.binary).map((file) => ({ type: "file" as const, path: file.path, displayName: file.displayName }));
             const basePrompt = withArtifactOutputPrompt(artifactInputPrompt(withContextTurn(turnPrompt, { userInstructionContext: options?.userInstructionContext }), staged), artifactRun, options?.transportContext);
             return sendUntilIdle(
               session,
               {
-                prompt: githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(basePrompt, rulesetRuntime) : basePrompt, githubRun),
+                prompt: githubContributionPrompt(rulesetRuntime ? rulesetToolPrompt(scheduleToolPrompt(basePrompt, scheduleRuntime), rulesetRuntime) : scheduleToolPrompt(basePrompt, scheduleRuntime), githubRun),
                 ...(attachments?.length ? { attachments } : {}),
               },
               options,
             );
-          }), Boolean(options?.transportContext?.attachments))));
+          }), Boolean(options?.transportContext?.attachments)))));
         } catch (error) {
           if (options?.signal?.aborted || (error instanceof RunTimeoutError && !error.cancellationConfirmed)) {
             this.abandonTimedOutSession(userId, session);
@@ -642,6 +650,7 @@ export class CopilotProvider implements Provider {
   async resetSession(key: string): Promise<void> {
     await this.artifactTools.reset(key);
     await this.rulesetTools.reset(key);
+    await this.scheduleTools.reset(key);
     await this.githubTools.reset(key);
     const session = this.sessions.get(key);
     const storedSessionId = this.store.get(key);
@@ -743,6 +752,7 @@ export class CopilotProvider implements Provider {
   async shutdown(): Promise<void> {
     await this.artifactTools.shutdown();
     await this.rulesetTools.shutdown();
+    await this.scheduleTools.shutdown();
     await this.githubTools.shutdown();
     const allSessions = Array.from(this.sessions.values());
     this.sessions.clear();

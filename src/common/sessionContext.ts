@@ -5,6 +5,8 @@ import { ARTIFACT_INSTRUCTIONS } from "./agentResponse.js";
 import { ARTIFACT_TOOLS } from "./artifactToolDefinitions.js";
 import { RULESET_TOOLS } from "./rulesetToolDefinitions.js";
 import { RULESET_INSTRUCTIONS } from "./rulesetToolBridge.js";
+import { SCHEDULE_TOOLS } from "./scheduleToolDefinitions.js";
+import { SCHEDULE_INSTRUCTIONS } from "./scheduleToolBridge.js";
 import { githubContributionsEnabled, githubContributionAccess, contributionReviewsEnabled } from "./githubContributionConfig.js";
 import { codexReviewInstructions, githubContributionInstructions, githubContributionCallLimits, githubContributionTools } from "./githubContributionToolDefinitions.js";
 import { githubContributionLimits } from "./githubContributionLimits.js";
@@ -19,6 +21,7 @@ export interface TransportContext {
   platform: "slack" | "cli";
   history: boolean;
   attachments: boolean;
+  schedules?: boolean;
   /** Host-derived Jev classification for this turn. Absent preserves the Discord profile. */
   classification?: ChatClassification;
 }
@@ -52,6 +55,7 @@ export interface SessionContext {
   fingerprint: string;
   transportContext?: ContextRequest["transportContext"];
   rulesetsEnabled: boolean;
+  schedulesEnabled: boolean;
   githubContributionsEnabled: boolean;
   sitesEnabled: boolean;
 }
@@ -100,6 +104,11 @@ export const CONTEXT_CONTRIBUTORS: readonly ContextContributor[] = [
     } : undefined,
   },
   {
+    id: "schedules",
+    profiles: ["conversation"],
+    resolve: request => request.transportContext?.schedules ? { instructions: SCHEDULE_INSTRUCTIONS, capabilities: SCHEDULE_TOOLS } : undefined,
+  },
+  {
     id: "github-contributions",
     profiles: ["conversation"],
     resolve: () => githubContributionsEnabled() ? {
@@ -143,9 +152,13 @@ export function resolveSessionContext(
   if (request.transportContext) {
     // Only claim a capability the transport actually resolved for this turn; an
     // admitted direct-message turn cannot also be told that DMs are unavailable.
-    const unavailable = request.transportContext.classification?.form === 'direct'
-      ? 'Persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.'
-      : 'DMs, persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.';
+    const unavailable = request.transportContext.schedules
+      ? (request.transportContext.classification?.form === 'direct'
+        ? 'Persistent memory, ruleset management and GitHub contribution tools are unavailable. Host-managed schedules are available through confirmed platform schedule requests; never invent a saved schedule or claim persistence before host confirmation.'
+        : 'DMs, persistent memory, ruleset management and GitHub contribution tools are unavailable. Host-managed schedules are available through confirmed platform schedule requests; never invent a saved schedule or claim persistence before host confirmation.')
+      : request.transportContext.classification?.form === 'direct'
+        ? 'Persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.'
+        : 'DMs, persistent memory, schedules, ruleset management and GitHub contribution tools are unavailable.';
     resolved.push({ id: 'transport', instructions: [
       'You are responding through ' + request.transportContext.platform + '.',
       request.transportContext.attachments ? 'You can attach validated files to this response using the artifact tools.' : 'Output is text-only. File delivery is unavailable.',
@@ -165,6 +178,7 @@ export function resolveSessionContext(
     fingerprint: contextFingerprint(applied),
     transportContext: request.transportContext,
     rulesetsEnabled: resolved.some(part => part.id === "user-rulesets"),
+    schedulesEnabled: resolved.some(part => part.id === "schedules"),
     githubContributionsEnabled: resolved.some(part => part.id === "github-contributions"),
     sitesEnabled: !request.transportContext && configuredSitesEnabled(),
   };

@@ -15,6 +15,7 @@ import type { DeliveryPart, ScheduledTask, TaskRun } from "./types.js";
 import { previousLookupContext, SCHEDULE_LOOKUP_INSTRUCTIONS } from "./lookups.js";
 
 export class DiscordScheduleAdapter implements ScheduleAdapter {
+  readonly platform = "discord" as const;
   constructor(private client: Client, private access: AccessPolicy, private sessions: SessionManager) {}
   private async destination(task: ScheduledTask): Promise<GuildTextBasedChannel> {
     const channel = await this.client.channels.fetch(task.channelId, { force: true });

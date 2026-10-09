@@ -4,6 +4,8 @@ import type { ArtifactMcpConfig } from "./artifactToolBridge.js";
 import type { RulesetMcpConfig } from "./rulesetToolBridge.js";
 import { githubContributionTools } from "./githubContributionToolDefinitions.js";
 import type { GitHubContributionMcpConfig } from "./githubContributionToolBridge.js";
+import { SCHEDULE_TOOLS } from "./scheduleToolDefinitions.js";
+import type { ScheduleMcpConfig } from "./scheduleToolBridge.js";
 
 function localServerToml(
   config: { command: string; args: string[]; env: Record<string, string> },
@@ -15,20 +17,22 @@ function localServerToml(
   return `{command=${JSON.stringify(config.command)},args=${JSON.stringify(config.args)},env={${env}},tools={${toolConfig}},startup_timeout_sec=60,tool_timeout_sec=${timeoutSec}}`;
 }
 
-export function codexHostMcpOverride(artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, github?: GitHubContributionMcpConfig): string {
-  if (!artifacts && !rulesets && !github) return "mcp_servers={}";
+export function codexHostMcpOverride(artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, github?: GitHubContributionMcpConfig, schedules?: ScheduleMcpConfig): string {
+  if (!artifacts && !rulesets && !github && !schedules) return "mcp_servers={}";
   const servers: string[] = [];
   if (artifacts) servers.push(`artifact_tools=${localServerToml(artifacts, ARTIFACT_TOOLS, 960)}`);
   if (rulesets) servers.push(`ruleset_tools=${localServerToml(rulesets, RULESET_TOOLS, 120)}`);
   if (github) servers.push(`github_contributions=${localServerToml(github, githubContributionTools(), 120)}`);
+  if (schedules) servers.push(`schedule_tools=${localServerToml(schedules, SCHEDULE_TOOLS, 120)}`);
   return `mcp_servers={${servers.join(",")}}`;
 }
 
-export function codexHostMcpOverrides(artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, replaceAll = true, github?: GitHubContributionMcpConfig): string[] {
-  if (replaceAll) return [codexHostMcpOverride(artifacts, rulesets, github)];
+export function codexHostMcpOverrides(artifacts?: ArtifactMcpConfig, rulesets?: RulesetMcpConfig, replaceAll = true, github?: GitHubContributionMcpConfig, schedules?: ScheduleMcpConfig): string[] {
+  if (replaceAll) return [codexHostMcpOverride(artifacts, rulesets, github, schedules)];
   const overrides: string[] = [];
   if (artifacts) overrides.push(`mcp_servers.artifact_tools=${localServerToml(artifacts, ARTIFACT_TOOLS, 960)}`);
   if (rulesets) overrides.push(`mcp_servers.ruleset_tools=${localServerToml(rulesets, RULESET_TOOLS, 120)}`);
   if (github) overrides.push(`mcp_servers.github_contributions=${localServerToml(github, githubContributionTools(), 120)}`);
+  if (schedules) overrides.push(`mcp_servers.schedule_tools=${localServerToml(schedules, SCHEDULE_TOOLS, 120)}`);
   return overrides;
 }

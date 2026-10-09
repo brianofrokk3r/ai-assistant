@@ -5,13 +5,13 @@ import { configuredUserInstructionMode } from "./userInstructionStore.js";
 import { githubContributionAccess } from "./githubContributionConfig.js";
 export const CAPABILITIES = [
     "chat.use", "ask.use", "session.configure", "workspace.manage", "mcp.manage", "bot.manage",
-    "ruleset.manage", "github.contribute", "github.merge", "github.release", "schedule.message.create", "schedule.ai.create", "schedule.manage.own", "schedule.manage.guild",
+    "ruleset.manage", "github.contribute", "github.merge", "github.release", "schedule.message.create", "schedule.ai.create", "schedule.manage.own", "schedule.manage.guild", "schedule.manage.tenant",
 ];
 const PRESETS = {
     member: ["chat.use"],
     contributor: ["chat.use", "github.contribute"],
     scheduler: ["chat.use", "schedule.message.create", "schedule.manage.own"],
-    "server-admin": ["chat.use", "ruleset.manage", "schedule.message.create", "schedule.manage.own", "schedule.manage.guild"],
+    "server-admin": ["chat.use", "ruleset.manage", "schedule.message.create", "schedule.manage.own", "schedule.manage.guild", "schedule.manage.tenant"],
     "bot-admin": [...CAPABILITIES],
 };
 function ids(value) { return new Set((value ?? "").split(",").map(x => x.trim()).filter(Boolean)); }
@@ -24,9 +24,12 @@ export function parseGrants(value) {
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
             throw new Error("Invalid rights grant.");
         const grant = raw;
-        if (Object.keys(grant).some(k => !["userId", "roleId", "guildId", "roles", "capabilities"].includes(k))
+        const platform = grant.platform ?? "discord";
+        const validId = (id) => id === undefined || (platform === "discord" ? /^\d+$/.test(id) : /^[A-Z0-9][A-Z0-9._-]*$/i.test(id));
+        if (Object.keys(grant).some(k => !["userId", "roleId", "guildId", "platform", "tenantId", "roles", "capabilities"].includes(k))
             || Boolean(grant.userId) === Boolean(grant.roleId)
-            || [grant.userId, grant.roleId, grant.guildId].some(id => id !== undefined && (typeof id !== "string" || !/^\d+$/.test(id)))
+            || ![grant.userId, grant.roleId, grant.guildId, grant.tenantId].every(id => typeof id === "string" ? validId(id) : id === undefined)
+            || ![undefined, "discord", "slack"].includes(grant.platform)
             || (grant.roleId && !grant.guildId)
             || (grant.roles !== undefined && (!Array.isArray(grant.roles) || grant.roles.some(r => !Object.hasOwn(PRESETS, r))))
             || (grant.capabilities !== undefined && (!Array.isArray(grant.capabilities) || grant.capabilities.some(c => !CAPABILITIES.includes(c))))) {
@@ -35,6 +38,8 @@ export function parseGrants(value) {
         if (grant.guildId && (grant.roles?.includes("bot-admin") || grant.capabilities?.includes("bot.manage"))) {
             throw new Error("Bot administration can only be granted globally to individual users.");
         }
+        if (grant.platform === "slack" && grant.roleId)
+            throw new Error("Slack schedule grants must target users, not Discord roles.");
         return grant;
     });
 }
@@ -42,7 +47,8 @@ export function createAccessPolicy(env = process.env) {
     const contributionAccess = githubContributionAccess(env);
     const allowed = ids(env.DISCORD_ALLOWED_USERS);
     const admins = ids(env.DISCORD_ADMIN_USERS);
-    const rightsFile = env.DISCORD_RIGHTS_FILE?.trim();
+    const slackAdmins = ids(env.SLACK_ADMIN_USERS);
+    const rightsFile = env.SCHEDULE_RIGHTS_FILE?.trim() || env.SLACK_RIGHTS_FILE?.trim() || env.DISCORD_RIGHTS_FILE?.trim();
     const workspace = configuredWorkspaceRoot(env);
     if (rightsFile && workspace) {
         const relative = path.relative(path.resolve(workspace), path.resolve(rightsFile));
@@ -51,12 +57,16 @@ export function createAccessPolicy(env = process.env) {
             throw new Error("DISCORD_RIGHTS_FILE must be outside the provider workspace root, including symlink targets.");
         }
     }
-    const grants = rightsFile ? parseGrants(JSON.parse(fs.readFileSync(rightsFile, "utf8"))) : [];
+    // Validate eagerly for clear startup failures, then reload for each decision so
+    // revocation is observable without restarting a scheduler worker.
+    const initialGrants = rightsFile ? parseGrants(JSON.parse(fs.readFileSync(rightsFile, "utf8"))) : [];
+    const currentGrants = () => rightsFile ? parseGrants(JSON.parse(fs.readFileSync(rightsFile, "utf8"))) : initialGrants;
     const matches = (g, s) => (g.userId === s.userId || Boolean(g.roleId && s.roleIds?.includes(g.roleId)))
-        && (!g.guildId || g.guildId === s.guildId);
-    const explicitAdmin = (s) => admins.has(s.userId) || grants.some(g => !g.guildId && matches(g, s)
+        && (g.platform ?? "discord") === (s.platform ?? "discord")
+        && (!g.guildId || g.guildId === s.guildId) && (!g.tenantId || g.tenantId === (s.tenantId ?? s.guildId));
+    const explicitAdmin = (s) => ((s.platform ?? "discord") === "slack" ? slackAdmins.has(s.userId) : admins.has(s.userId)) || currentGrants().some(g => !g.guildId && !g.tenantId && matches(g, s)
         && g.roles?.includes("bot-admin"));
-    const granted = (s, capability) => grants.some(g => matches(g, s)
+    const granted = (s, capability) => currentGrants().some(g => matches(g, s)
         && (g.capabilities?.includes(capability) || g.roles?.some(role => PRESETS[role].includes(capability))));
     const legacyMessage = (userId) => allowed.size === 0 || allowed.has(userId);
     const legacyAdmin = (userId) => admins.size > 0 ? admins.has(userId) : legacyMessage(userId);
@@ -68,7 +78,9 @@ export function createAccessPolicy(env = process.env) {
         can(s, capability, resource = {}) {
             if (!CAPABILITIES.includes(capability))
                 return false;
-            if (resource.guildId && resource.guildId !== s.guildId)
+            if (resource.guildId && resource.guildId !== (s.guildId ?? s.tenantId))
+                return false;
+            if (resource.destination && (resource.destination.platform !== (s.platform ?? "discord") || resource.destination.tenantId !== (s.tenantId ?? s.guildId)))
                 return false;
             if (capability === "schedule.manage.own" && resource.ownerId && resource.ownerId !== s.userId)
                 return false;
@@ -82,7 +94,7 @@ export function createAccessPolicy(env = process.env) {
             if (capability === "github.merge" || capability === "github.release")
                 return Boolean(s.guildId) && (explicitAdmin(s) || granted(s, capability));
             if (capability.startsWith("schedule.")) {
-                if (!s.guildId)
+                if (!(s.guildId ?? s.tenantId))
                     return false;
                 // Legacy open-admin fallback never grants unattended execution.
                 return explicitAdmin(s) || granted(s, capability);
