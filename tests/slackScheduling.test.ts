@@ -68,8 +68,22 @@ test("agent schedule tools propose a host-bound schedule, require confirmation, 
   const proposalId = proposed.proposal_id; assert.match(proposalId, /^proposal_[a-f0-9]+$/); assert.equal(f.store.list(undefined, "slack").length, 0);
   await frontend.handle({ ...turn, text: `confirm ${proposalId}` });
   const task = f.store.list("T", "slack")[0]; assert.equal(task.destination?.threadId, input.conversation.threadId);
+  assert.match(f.calls.at(-1)?.args?.text ?? "", /Schedule created:[\s\S]*Status: enabled/);
   await f.service.runNow(input.actor, task.id); await f.scheduler.idle();
   assert.match(f.generated[0], /untrusted context/); assert.equal(f.store.runs(task.id)[0].state, "succeeded");
+});
+
+test("Slack edit confirmation revives an automatically expired schedule and reports the update", async t => {
+  const f = fixture(t); const frontend = new SlackScheduleFrontend(f.service, f.api, { timezone: "UTC", provider: "codex", model: "test" });
+  const created = await f.service.proposeCreate(input.actor, input.conversation, { guildId: "T", channelId: "C",
+    destination: { version: 1, platform: "slack", tenantId: "T", installationId: "i", channelId: "C", kind: "channel" },
+    kind: "message", content: "Reminder", cron: "0 13 * * *", timezone: "UTC", contextMessages: 0, endAt: now + 30_000 });
+  const task = (await f.service.confirm(input.actor, input.conversation, created.id)).task;
+  f.store.pause(task.id, "Schedule reached its end date.");
+  const proposal = await f.service.proposeEdit(input.actor, input.conversation, task.id, { endAt: now + 60_000 });
+  await frontend.handle({ ...input, text: `confirm ${proposal.id}` });
+  assert.equal(f.store.get(task.id)?.enabled, true);
+  assert.match(f.calls.at(-1)?.args?.text ?? "", /Schedule updated:[\s\S]*Status: enabled/);
 });
 
 test("free-form scheduling reaches the agent and schedule context teaches tool-based interpretation", async t => {

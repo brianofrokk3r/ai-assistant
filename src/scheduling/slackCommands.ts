@@ -30,7 +30,9 @@ export class SlackScheduleFrontend {
     if (confirm) {
       try {
         const result = await this.service.confirm(input.actor, input.conversation, confirm[1]);
-        await this.reply(input, `${result.duplicate ? "Already confirmed" : "Schedule created"}: ${result.task.id}\n${this.service.describe(result.task)}`);
+        const outcome = result.duplicate ? "Already confirmed" : result.action === "edit" ? "Schedule updated" : "Schedule created";
+        const status = result.task.enabled ? "enabled" : `paused (${result.task.pauseReason ?? "no reason"})`;
+        await this.reply(input, `${outcome}: ${result.task.id}\n${this.service.describe(result.task)}\nStatus: ${status}`);
       } catch (error) { await this.reply(input, error instanceof Error ? error.message : "Schedule confirmation failed."); }
       return true;
     }

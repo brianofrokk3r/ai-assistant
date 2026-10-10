@@ -536,10 +536,12 @@ delivery retries cannot start early. The first automatic run is the first cron
 occurrence at or after the start; a run exactly at the start time is included.
 
 At or after the cutoff, the schedule is marked ended: no new runs or delivery
-retries can start, and pending output is suppressed. A run exactly at the end
-time is excluded. This also applies after a bot restart. Existing tasks without
-date limits keep their current behavior. To restart an ended schedule, extend or clear
-its end date, then use `/schedule resume`. Ended tasks retain their history and
+retries can start. A run claimed before the cutoff may finish and deliver its
+output afterward; an explicit pause or edit still suppresses stale output. A run
+exactly at the end time is excluded. This also applies after a bot restart. Existing tasks without
+date limits keep their current behavior. Extending or clearing the end date of a
+schedule paused automatically at its cutoff re-enables it; schedules paused by a
+user remain paused until `/schedule resume`. Ended tasks retain their history and
 count toward quotas until deleted. Like pausing, ending cannot recall messages
 already being sent or undo provider tool effects; active inference may still finish.
 

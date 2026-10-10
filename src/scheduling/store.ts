@@ -6,6 +6,7 @@ import { nextOccurrences, scheduleHasEnded, scheduleHasStarted } from "./cron.js
 import { scheduleDestination, scheduleOwnerKey, schedulePlatform, scheduleTenantKey, type SchedulePlatform, type ScheduledTask, type TaskRun } from "./types.js";
 
 export class SchedulerLeaseHeldError extends Error {}
+export const SCHEDULE_ENDED_PAUSE_REASON = "Schedule reached its end date.";
 const LEGACY_RESTART_PAUSE = "Interrupted by restart. Inspect before resuming; execution or delivery may have occurred.";
 const LEGACY_SAVED_OUTPUT = "Output was saved before restart. Retry delivery if it is still wanted.";
 
@@ -149,7 +150,7 @@ export class ScheduleStore {
   expire(id: string, now: number): boolean {
     const task = this.get(id);
     if (!task || !scheduleHasEnded(task, now)) return false;
-    if (task.enabled) this.pause(id, "Schedule reached its end date.");
+    if (task.enabled) this.pause(id, SCHEDULE_ENDED_PAUSE_REASON);
     return true;
   }
   runs(taskId: string): TaskRun[] {

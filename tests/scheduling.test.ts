@@ -206,16 +206,23 @@ test("cutoffs between occurrences expire even when the next run is still in the 
   f.scheduler.tick();
   assert.equal(f.store.get(task.id)?.revision, ended.revision);
   await f.scheduler.edit(admin, task.id, { endAt: f.now() + 45_000 });
-  assert.equal(f.store.get(task.id)?.enabled, false);
-  await f.scheduler.resume(admin, task.id);
   assert.equal(f.store.get(task.id)?.enabled, true);
   f.advance(45_000);
   f.scheduler.tick();
   await f.scheduler.edit(admin, task.id, { endAt: undefined });
-  await f.scheduler.resume(admin, task.id);
+  assert.equal(f.store.get(task.id)?.enabled, true);
   await f.scheduler.runNow(admin, task.id);
   await f.scheduler.idle();
   assert.deepEqual(f.sent, ["Reminder"]);
+});
+
+test("editing dates does not resume a schedule paused by a user", async t => {
+  const f = fixture(t);
+  const task = await f.scheduler.create(admin, { ...input, endAt: f.now() + 30_000 });
+  f.scheduler.pause(admin, task.id);
+  const edited = await f.scheduler.edit(admin, task.id, { endAt: f.now() + 60_000 });
+  assert.equal(edited.enabled, false);
+  assert.equal(edited.pauseReason, "Paused by a user.");
 });
 
 for (const action of ["clear", "extend"] as const) test(`${action} an elapsed end date before the next tick keeps the schedule paused`, async t => {
@@ -260,22 +267,23 @@ test("an expired task cannot be claimed automatically or manually before the nex
   assert.deepEqual(f.store.runs(task.id), []);
 });
 
-test("a cutoff reached during generation suppresses the pending output without waiting for a tick", async t => {
+test("a run claimed before its cutoff can finish after the schedule ends", async t => {
   const gate = deferred();
-  const f = fixture(t, { generate: async () => { await gate.promise; return [{ content: "Too late" }]; } });
+  const f = fixture(t, { generate: async () => { await gate.promise; return [{ content: "Finished" }]; } });
   t.after(async () => { gate.resolve(); });
   const task = await f.scheduler.create(admin, { ...input, kind: "ai", provider: "codex", model: "test", endAt: f.now() + 30_000 });
   const runId = await f.scheduler.runNow(admin, task.id);
   await new Promise(resolve => setImmediate(resolve));
   f.advance(30_000);
+  f.scheduler.tick();
   gate.resolve();
   await f.scheduler.idle();
-  assert.deepEqual(f.sent, []);
-  assert.equal(f.store.getRun(runId)?.state, "cancelled");
+  assert.deepEqual(f.sent, ["Finished"]);
+  assert.equal(f.store.getRun(runId)?.state, "succeeded");
   assert.equal(f.store.get(task.id)?.enabled, false);
 });
 
-test("the final send check blocks delivery when the cutoff passes during channel lookup", async t => {
+test("a cutoff passing during the final send check does not discard claimed output", async t => {
   let sends = 0;
   const f = fixture(t, { send: async (_task, _part, _nonce, beforeSend) => {
     f.advance(30_000);
@@ -286,8 +294,10 @@ test("the final send check blocks delivery when the cutoff passes during channel
   const task = await f.scheduler.create(admin, { ...input, endAt: f.now() + 30_000 });
   const runId = await f.scheduler.runNow(admin, task.id);
   await f.scheduler.idle();
-  assert.equal(sends, 0);
-  assert.equal(f.store.getRun(runId)?.state, "cancelled");
+  assert.equal(sends, 1);
+  assert.equal(f.store.getRun(runId)?.state, "succeeded");
+  f.scheduler.tick();
+  assert.equal(f.store.get(task.id)?.enabled, false);
 });
 
 test("failed delivery cannot be retried at or after the cutoff", async t => {
